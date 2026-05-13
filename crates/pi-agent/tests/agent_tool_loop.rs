@@ -46,6 +46,7 @@ fn provider_tool_call_runs_tool_and_returns_to_provider() {
     assert_eq!(loaded.messages[0].role, Role::User);
     assert_eq!(loaded.messages[0].content, "CALL_TOOL ls .");
     assert_eq!(loaded.messages[1].role, Role::Tool);
+    assert_eq!(loaded.messages[1].tool_call_id.as_deref(), Some("echo-ls"));
     assert_eq!(loaded.messages[2].role, Role::Assistant);
 
     let _ = fs::remove_dir_all(root);

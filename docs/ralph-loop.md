@@ -78,3 +78,19 @@ Why this matters:
 
 - Installation and provider failures become diagnosable without reading source code.
 - This supports the design goal of better operational clarity than ad hoc Rust ports.
+
+## Iteration 7
+
+Focus: preserve structured tool result identity across the agent/session/provider loop.
+
+Changes:
+
+- Added optional `tool_call_id` metadata to `Message`.
+- Persisted `tool_call_id` in JSONL session records.
+- Agent now writes provider-driven tool outputs with the originating call ID.
+- OpenAI-compatible requests serialize tool results as `role=tool` with `tool_call_id` when available.
+
+Why this matters:
+
+- Tool result identity is required for real OpenAI-compatible tool calling parity.
+- This removes a major simplification from the previous provider-driven tool loop.

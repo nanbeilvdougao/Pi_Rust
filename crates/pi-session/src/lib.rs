@@ -124,11 +124,17 @@ impl SessionStore for JsonlSessionStore {
 }
 
 pub fn format_jsonl_message(message: &Message) -> String {
+    let tool_call_id = message
+        .tool_call_id
+        .as_ref()
+        .map(|id| format!(",\"tool_call_id\":\"{}\"", escape_json_string(id)))
+        .unwrap_or_default();
     format!(
-        "{{\"role\":\"{}\",\"timestamp_ms\":{},\"content\":\"{}\"}}",
+        "{{\"role\":\"{}\",\"timestamp_ms\":{},\"content\":\"{}\"{}}}",
         message.role.as_str(),
         message.timestamp_ms,
-        escape_json_string(&message.content)
+        escape_json_string(&message.content),
+        tool_call_id
     )
 }
 
@@ -143,7 +149,10 @@ pub fn parse_jsonl_message(line: &str) -> Option<Message> {
         _ => return None,
     };
 
-    Some(Message::new(role, unescape_json_string(&content)))
+    let mut message = Message::new(role, unescape_json_string(&content));
+    message.tool_call_id =
+        extract_json_field(line, "tool_call_id").map(|id| unescape_json_string(&id));
+    Some(message)
 }
 
 fn extract_json_field(line: &str, field: &str) -> Option<String> {

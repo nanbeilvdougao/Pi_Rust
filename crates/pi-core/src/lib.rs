@@ -67,6 +67,7 @@ pub struct Message {
     pub role: Role,
     pub content: String,
     pub timestamp_ms: u128,
+    pub tool_call_id: Option<String>,
 }
 
 impl Message {
@@ -75,6 +76,16 @@ impl Message {
             role,
             content: content.into(),
             timestamp_ms: now_ms(),
+            tool_call_id: None,
+        }
+    }
+
+    pub fn tool_result(tool_call_id: Option<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            timestamp_ms: now_ms(),
+            tool_call_id,
         }
     }
 }

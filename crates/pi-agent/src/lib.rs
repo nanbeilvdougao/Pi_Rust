@@ -100,6 +100,7 @@ impl<S: SessionStore> AgentRuntime<S> {
             }
 
             for invocation in response.tool_calls {
+                let tool_call_id = invocation.id.clone();
                 let call = tool_call_from_invocation(invocation);
                 events.push(Event::ToolStarted {
                     name: call.name.clone(),
@@ -109,8 +110,10 @@ impl<S: SessionStore> AgentRuntime<S> {
                     name: output.name.clone(),
                     output: output.output.clone(),
                 });
-                let tool_message =
-                    Message::new(Role::Tool, format!("{}:\n{}", output.name, output.output));
+                let tool_message = Message::tool_result(
+                    tool_call_id,
+                    format!("{}:\n{}", output.name, output.output),
+                );
                 self.session_store.append(session_id, &tool_message)?;
                 session.push(tool_message);
             }

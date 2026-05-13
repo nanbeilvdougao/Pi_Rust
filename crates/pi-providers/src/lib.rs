@@ -390,15 +390,24 @@ fn openai_chat_body(request: &ProviderRequest) -> String {
         .messages
         .iter()
         .map(|message| {
-            let (role, content) = if message.role == Role::Tool {
-                ("user", format!("Tool result:\n{}", message.content))
-            } else {
-                (message.role.as_str(), message.content.clone())
-            };
+            if message.role == Role::Tool {
+                if let Some(tool_call_id) = &message.tool_call_id {
+                    return format!(
+                        "{{\"role\":\"tool\",\"tool_call_id\":\"{}\",\"content\":\"{}\"}}",
+                        escape_json_string(tool_call_id),
+                        escape_json_string(&message.content)
+                    );
+                }
+                return format!(
+                    "{{\"role\":\"user\",\"content\":\"{}\"}}",
+                    escape_json_string(&format!("Tool result:\n{}", message.content))
+                );
+            }
+
             format!(
                 "{{\"role\":\"{}\",\"content\":\"{}\"}}",
-                role,
-                escape_json_string(&content)
+                message.role.as_str(),
+                escape_json_string(&message.content)
             )
         })
         .collect::<Vec<_>>()
@@ -669,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn openai_body_includes_tool_results_as_context() {
+    fn openai_body_includes_structured_tool_results() {
         let request = ProviderRequest {
             model: ModelSelection {
                 provider: "deepseek".to_string(),
@@ -677,7 +686,7 @@ mod tests {
             },
             messages: vec![
                 Message::new(Role::User, "解释代码"),
-                Message::new(Role::Tool, "tool output"),
+                Message::tool_result(Some("call_1".to_string()), "tool output"),
             ],
             tools: Vec::new(),
         };
@@ -685,7 +694,8 @@ mod tests {
         let body = openai_chat_body(&request);
         assert!(body.contains("\"model\":\"deepseek-chat\""));
         assert!(body.contains("解释代码"));
-        assert!(body.contains("Tool result"));
+        assert!(body.contains("\"role\":\"tool\""));
+        assert!(body.contains("\"tool_call_id\":\"call_1\""));
         assert!(body.contains("tool output"));
     }
 
