@@ -62,3 +62,19 @@ Why this matters:
 Known limitation:
 
 - Cloud providers currently use `curl` as an interim TLS transport because the current environment lacks Cargo/Rust tooling to add and verify a native HTTP dependency.
+
+## Iteration 4
+
+Focus: make the CLI easier to operate and debug.
+
+Changes:
+
+- Added `pi doctor`.
+- Reports whether `cargo`, `rustc`, and `curl` are available.
+- Reports the session root and whether it exists.
+- Reports provider credential environment status without printing secrets.
+
+Why this matters:
+
+- Installation and provider failures become diagnosable without reading source code.
+- This supports the design goal of better operational clarity than ad hoc Rust ports.

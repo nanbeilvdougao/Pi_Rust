@@ -1,5 +1,6 @@
 use std::env;
 use std::path::PathBuf;
+use std::process::Command;
 
 use pi_agent::AgentRuntime;
 use pi_core::{AppConfig, Event, ModelSelection, PiError, PiErrorKind, PiResult, VERSION};
@@ -19,6 +20,11 @@ fn run() -> PiResult<()> {
 
     if parsed.help {
         print_help();
+        return Ok(());
+    }
+
+    if parsed.doctor {
+        print_doctor()?;
         return Ok(());
     }
 
@@ -86,6 +92,7 @@ fn run() -> PiResult<()> {
 #[derive(Debug, Clone)]
 struct ParsedArgs {
     help: bool,
+    doctor: bool,
     version: bool,
     list_providers: bool,
     list_models: bool,
@@ -103,6 +110,7 @@ impl ParsedArgs {
     fn parse(args: impl IntoIterator<Item = String>) -> PiResult<Self> {
         let mut parsed = Self {
             help: false,
+            doctor: false,
             version: false,
             list_providers: false,
             list_models: false,
@@ -120,6 +128,7 @@ impl ParsedArgs {
         while let Some(arg) = iter.next() {
             match arg.as_str() {
                 "-h" | "--help" => parsed.help = true,
+                "doctor" if parsed.prompt.is_none() => parsed.doctor = true,
                 "-V" | "--version" => parsed.version = true,
                 "--list-providers" => parsed.list_providers = true,
                 "--list-models" => parsed.list_models = true,
@@ -185,7 +194,7 @@ fn default_session_root() -> PiResult<PathBuf> {
 
 fn print_help() {
     println!(
-        "Pi Rust\n\n用法:\n  pi [OPTIONS] <MESSAGE>\n\n选项:\n  -p, --print              单次输出模式\n  -c, --continue           继续默认会话\n      --session <ID>       使用指定会话 ID\n      --provider <NAME>    设置 provider，默认 echo\n      --model <MODEL>      设置模型，默认 echo-local\n      --tools <LIST>       启用指定工具，逗号分隔\n      --list-providers     列出内置 provider\n      --list-models        列出内置模型预设\n      --list-tools         列出内置工具 schema\n      --no-tools           禁用内置工具\n  -h, --help               显示帮助\n  -V, --version            显示版本\n\n工具快捷方式:\n  /tool read README.md\n  /tool ls ."
+        "Pi Rust\n\n用法:\n  pi [OPTIONS] <MESSAGE>\n  pi doctor\n\n选项:\n  -p, --print              单次输出模式\n  -c, --continue           继续默认会话\n      --session <ID>       使用指定会话 ID\n      --provider <NAME>    设置 provider，默认 echo\n      --model <MODEL>      设置模型，默认 echo-local\n      --tools <LIST>       启用指定工具，逗号分隔\n      --list-providers     列出内置 provider\n      --list-models        列出内置模型预设\n      --list-tools         列出内置工具 schema\n      --no-tools           禁用内置工具\n  -h, --help               显示帮助\n  -V, --version            显示版本\n\n工具快捷方式:\n  /tool read README.md\n  /tool ls ."
     );
 }
 
@@ -224,4 +233,38 @@ fn print_tools() {
             schema.name, mutation, schema.input_shape, schema.description
         );
     }
+}
+
+fn print_doctor() -> PiResult<()> {
+    println!("Pi Rust doctor");
+    print_command_status("cargo");
+    print_command_status("rustc");
+    print_command_status("curl");
+
+    let session_root = default_session_root()?;
+    println!("session_root\t{}", session_root.display());
+    println!("session_root_exists\t{}", session_root.exists());
+
+    for provider in ProviderRegistry::builtin().list() {
+        if let Some(env_name) = &provider.requires_api_key_env {
+            let status = if env::var(env_name).is_ok() {
+                "configured"
+            } else {
+                "missing"
+            };
+            println!("provider_env\t{}\t{}\t{}", provider.id, env_name, status);
+        }
+    }
+
+    Ok(())
+}
+
+fn print_command_status(command: &str) {
+    let lookup = format!("command -v {command}");
+    let status = Command::new("sh")
+        .args(["-c", lookup.as_str()])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    println!("command\t{command}\t{}", if status { "found" } else { "missing" });
 }

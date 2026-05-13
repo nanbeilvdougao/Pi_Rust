@@ -5,6 +5,7 @@ The parity ledger records behavior against the TypeScript Pi baseline and existi
 | Area | Status | Decision | Evidence |
 | --- | --- | --- | --- |
 | CLI help/version | must-match | MVP supports stable flags with simpler parser | `crates/pi-cli` |
+| CLI doctor diagnostics | intentional-difference | `pi doctor` reports local toolchain, curl, session path, and provider credential status | `crates/pi-cli` |
 | CLI model listing | must-match | `--list-models` lists provider model presets | `crates/pi-cli`, `crates/pi-providers` |
 | CLI tool listing and selection | must-match | `--list-tools` and `--tools` expose and restrict built-in tool schemas | `crates/pi-cli`, `crates/pi-tools` |
 | Provider registry | intentional-difference | Chinese/local providers are listed from the start | `crates/pi-providers` |

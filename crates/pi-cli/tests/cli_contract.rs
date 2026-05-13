@@ -37,3 +37,17 @@ fn print_mode_returns_local_response() {
     assert!(stdout.contains("Pi Rust MVP"));
     assert!(stdout.contains("你好"));
 }
+
+#[test]
+fn doctor_reports_environment_status() {
+    let output = Command::new(env!("CARGO_BIN_EXE_pi"))
+        .arg("doctor")
+        .output()
+        .expect("run pi doctor");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Pi Rust doctor"));
+    assert!(stdout.contains("command\tcurl"));
+    assert!(stdout.contains("provider_env\tmoonshot"));
+}
