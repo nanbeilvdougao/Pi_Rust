@@ -1,0 +1,21 @@
+[package]
+name = "pi-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "pi"
+path = "src/main.rs"
+
+[dependencies]
+pi-agent = { path = "../pi-agent" }
+pi-core = { path = "../pi-core" }
+pi-providers = { path = "../pi-providers" }
+pi-session = { path = "../pi-session" }
+
+[lints]
+workspace = true

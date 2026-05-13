@@ -1,0 +1,7 @@
+--provider
+--model
+--list-providers
+--session
+--continue
+--print
+--no-tools

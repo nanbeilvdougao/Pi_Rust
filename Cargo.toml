@@ -1,0 +1,29 @@
+[workspace]
+members = [
+    "crates/pi-agent",
+    "crates/pi-cli",
+    "crates/pi-core",
+    "crates/pi-ext",
+    "crates/pi-permissions",
+    "crates/pi-providers",
+    "crates/pi-session",
+    "crates/pi-tools",
+    "crates/pi-tui",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Shellmia0/Pi_Rust"
+homepage = "https://github.com/Shellmia0/Pi_Rust"
+rust-version = "1.75"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+panic = "warn"
+unwrap_used = "warn"
+expect_used = "warn"

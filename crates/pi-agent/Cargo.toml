@@ -1,0 +1,18 @@
+[package]
+name = "pi-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pi-core = { path = "../pi-core" }
+pi-permissions = { path = "../pi-permissions" }
+pi-providers = { path = "../pi-providers" }
+pi-session = { path = "../pi-session" }
+pi-tools = { path = "../pi-tools" }
+
+[lints]
+workspace = true
