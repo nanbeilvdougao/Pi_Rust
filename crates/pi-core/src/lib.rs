@@ -100,6 +100,7 @@ pub struct AppConfig {
     pub session_path: Option<String>,
     pub print_mode: bool,
     pub tools_enabled: bool,
+    pub enabled_tool_names: Option<Vec<String>>,
     pub locale: Locale,
 }
 
@@ -110,6 +111,7 @@ impl Default for AppConfig {
             session_path: None,
             print_mode: false,
             tools_enabled: true,
+            enabled_tool_names: None,
             locale: Locale::ZhCn,
         }
     }

@@ -41,6 +41,32 @@ impl ToolRuntime {
         runtime
     }
 
+    pub fn builtin_with_names(names: &[String]) -> PiResult<Self> {
+        let mut runtime = Self::default();
+        let mut unknown = Vec::new();
+        for name in names {
+            match name.as_str() {
+                "read" => runtime.register(Box::new(ReadTool)),
+                "write" => runtime.register(Box::new(WriteTool)),
+                "edit" => runtime.register(Box::new(EditTool)),
+                "bash" => runtime.register(Box::new(BashTool)),
+                "epkg" => runtime.register(Box::new(EpkgTool)),
+                "search" => runtime.register(Box::new(SearchTool)),
+                "ls" => runtime.register(Box::new(LsTool)),
+                other => unknown.push(other.to_string()),
+            }
+        }
+
+        if unknown.is_empty() {
+            Ok(runtime)
+        } else {
+            Err(PiError::new(
+                PiErrorKind::Tool,
+                format!("未知工具：{}", unknown.join(", ")),
+            ))
+        }
+    }
+
     pub fn register(&mut self, tool: Box<dyn Tool>) {
         self.tools.insert(tool.schema().name.clone(), tool);
     }

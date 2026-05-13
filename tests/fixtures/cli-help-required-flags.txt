@@ -1,7 +1,9 @@
 --provider
 --model
+--tools
 --list-providers
 --list-models
+--list-tools
 --session
 --continue
 --print

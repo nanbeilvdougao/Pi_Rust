@@ -12,8 +12,10 @@ fn help_contains_stable_flags() {
     for flag in [
         "--provider",
         "--model",
+        "--tools",
         "--list-providers",
         "--list-models",
+        "--list-tools",
         "--session",
         "--continue",
         "--print",

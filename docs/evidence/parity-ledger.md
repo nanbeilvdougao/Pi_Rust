@@ -6,6 +6,7 @@ The parity ledger records behavior against the TypeScript Pi baseline and existi
 | --- | --- | --- | --- |
 | CLI help/version | must-match | MVP supports stable flags with simpler parser | `crates/pi-cli` |
 | CLI model listing | must-match | `--list-models` lists provider model presets | `crates/pi-cli`, `crates/pi-providers` |
+| CLI tool listing and selection | must-match | `--list-tools` and `--tools` expose and restrict built-in tool schemas | `crates/pi-cli`, `crates/pi-tools` |
 | Provider registry | intentional-difference | Chinese/local providers are listed from the start | `crates/pi-providers` |
 | Ollama provider execution | must-match-shape | Local `/api/chat` execution path exists; streaming is future work | `crates/pi-providers` |
 | Session format | must-match-shape | Append-only JSONL-like lines, schema to harden later | `crates/pi-session` |

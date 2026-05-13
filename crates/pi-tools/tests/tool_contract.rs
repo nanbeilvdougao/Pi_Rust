@@ -31,3 +31,10 @@ fn dangerous_bash_is_blocked_by_default() {
     assert_eq!(permissions.audit_log().len(), 1);
     assert!(!permissions.audit_log()[0].allowed);
 }
+
+#[test]
+fn builtin_tool_selection_rejects_unknown_names() {
+    let selected = vec!["read".to_string(), "missing".to_string()];
+    let result = ToolRuntime::builtin_with_names(&selected);
+    assert!(result.is_err());
+}

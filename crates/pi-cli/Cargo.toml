@@ -16,6 +16,7 @@ pi-agent = { path = "../pi-agent" }
 pi-core = { path = "../pi-core" }
 pi-providers = { path = "../pi-providers" }
 pi-session = { path = "../pi-session" }
+pi-tools = { path = "../pi-tools" }
 
 [lints]
 workspace = true

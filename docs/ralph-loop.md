@@ -26,3 +26,19 @@ Remaining gaps:
 - Cloud providers still need real HTTPS clients and streaming parsers.
 - Tool calling is still shortcut-driven instead of model-directed.
 - TUI, RPC, SDK, extension runtime, project indexing, and compaction remain incomplete.
+
+## Iteration 2
+
+Focus: expose tool discovery and selection through CLI instead of keeping tools as internal-only machinery.
+
+Changes:
+
+- Added `--list-tools` to print built-in tool schemas.
+- Added `--tools <LIST>` to select a comma-separated tool subset.
+- Added validation for unknown tool names.
+- Updated CLI parity evidence for tool discovery.
+
+Why this matters:
+
+- Tool schema visibility is required before provider-side tool calling can be made compatible with TypeScript Pi.
+- Restricting tools is a safety and reproducibility primitive for future differential tests.

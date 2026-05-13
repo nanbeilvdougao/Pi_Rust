@@ -27,6 +27,20 @@ impl<S: SessionStore> AgentRuntime<S> {
         }
     }
 
+    pub fn try_new(config: AppConfig, session_store: S) -> PiResult<Self> {
+        let tools = match &config.enabled_tool_names {
+            Some(names) => ToolRuntime::builtin_with_names(names)?,
+            None => ToolRuntime::builtin(),
+        };
+
+        Ok(Self {
+            config,
+            session_store,
+            tools,
+            permissions: PermissionEngine::new(PermissionMode::ConfirmMutations),
+        })
+    }
+
     pub fn run_single_turn(&mut self, session_id: &str, prompt: &str) -> PiResult<AgentTurn> {
         let mut events = vec![Event::UserMessage(prompt.to_string())];
         let mut session = self.session_store.load(session_id)?;
