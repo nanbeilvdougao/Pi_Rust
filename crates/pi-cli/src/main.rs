@@ -31,6 +31,11 @@ fn run() -> PiResult<()> {
         return Ok(());
     }
 
+    if parsed.list_models {
+        print_models();
+        return Ok(());
+    }
+
     let prompt = parsed.prompt.ok_or_else(|| {
         PiError::new(
             PiErrorKind::InvalidInput,
@@ -76,6 +81,7 @@ struct ParsedArgs {
     help: bool,
     version: bool,
     list_providers: bool,
+    list_models: bool,
     print_mode: bool,
     tools_enabled: bool,
     provider: String,
@@ -90,6 +96,7 @@ impl ParsedArgs {
             help: false,
             version: false,
             list_providers: false,
+            list_models: false,
             print_mode: false,
             tools_enabled: true,
             provider: "echo".to_string(),
@@ -104,6 +111,7 @@ impl ParsedArgs {
                 "-h" | "--help" => parsed.help = true,
                 "-V" | "--version" => parsed.version = true,
                 "--list-providers" => parsed.list_providers = true,
+                "--list-models" => parsed.list_models = true,
                 "-p" | "--print" => parsed.print_mode = true,
                 "--no-tools" => parsed.tools_enabled = false,
                 "--continue" | "-c" => parsed.session_id = Some("default".to_string()),
@@ -152,7 +160,7 @@ fn default_session_root() -> PiResult<PathBuf> {
 
 fn print_help() {
     println!(
-        "Pi Rust\n\n用法:\n  pi [OPTIONS] <MESSAGE>\n\n选项:\n  -p, --print              单次输出模式\n  -c, --continue           继续默认会话\n      --session <ID>       使用指定会话 ID\n      --provider <NAME>    设置 provider，默认 echo\n      --model <MODEL>      设置模型，默认 echo-local\n      --list-providers     列出内置 provider\n      --no-tools           禁用内置工具\n  -h, --help               显示帮助\n  -V, --version            显示版本\n\n工具快捷方式:\n  /tool read README.md\n  /tool ls ."
+        "Pi Rust\n\n用法:\n  pi [OPTIONS] <MESSAGE>\n\n选项:\n  -p, --print              单次输出模式\n  -c, --continue           继续默认会话\n      --session <ID>       使用指定会话 ID\n      --provider <NAME>    设置 provider，默认 echo\n      --model <MODEL>      设置模型，默认 echo-local\n      --list-providers     列出内置 provider\n      --list-models        列出内置模型预设\n      --no-tools           禁用内置工具\n  -h, --help               显示帮助\n  -V, --version            显示版本\n\n工具快捷方式:\n  /tool read README.md\n  /tool ls ."
     );
 }
 
@@ -166,5 +174,19 @@ fn print_providers() {
             "{}\t{}\t默认模型: {}\t{}",
             provider.id, provider.display_name, provider.default_model, key
         );
+    }
+}
+
+fn print_models() {
+    for provider in ProviderRegistry::builtin().list() {
+        println!("{}:", provider.id);
+        for model in &provider.supported_models {
+            let default_marker = if model == &provider.default_model {
+                " (默认)"
+            } else {
+                ""
+            };
+            println!("  {model}{default_marker}");
+        }
     }
 }

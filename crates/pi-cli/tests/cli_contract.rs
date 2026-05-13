@@ -13,6 +13,7 @@ fn help_contains_stable_flags() {
         "--provider",
         "--model",
         "--list-providers",
+        "--list-models",
         "--session",
         "--continue",
         "--print",

@@ -1,6 +1,7 @@
 --provider
 --model
 --list-providers
+--list-models
 --session
 --continue
 --print

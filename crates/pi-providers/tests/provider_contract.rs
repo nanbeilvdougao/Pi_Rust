@@ -14,6 +14,11 @@ fn registry_prioritizes_local_and_chinese_providers() {
 
     assert!(registry.get("ollama").expect("ollama").local_first);
     assert!(registry
+        .get("ollama")
+        .expect("ollama")
+        .supported_models
+        .contains(&"qwen2.5:7b".to_string()));
+    assert!(registry
         .get("moonshot")
         .expect("moonshot")
         .requires_api_key_env
