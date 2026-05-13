@@ -9,6 +9,7 @@ The parity ledger records behavior against the TypeScript Pi baseline and existi
 | CLI tool listing and selection | must-match | `--list-tools` and `--tools` expose and restrict built-in tool schemas | `crates/pi-cli`, `crates/pi-tools` |
 | Provider registry | intentional-difference | Chinese/local providers are listed from the start | `crates/pi-providers` |
 | Ollama provider execution | must-match-shape | Local `/api/chat` execution path exists; streaming is future work | `crates/pi-providers` |
+| OpenAI-compatible domestic providers | intentional-difference | Moonshot, DeepSeek, and Qwen have real chat-completions execution paths via their OpenAI-compatible APIs | `crates/pi-providers` |
 | Session format | must-match-shape | Append-only JSONL-like lines, schema to harden later | `crates/pi-session` |
 | Tool permissions | intentional-difference | Mutating tools require capability checks by default | `crates/pi-permissions`, `crates/pi-tools` |
 | Extension runtime | future | ABI first, JS/WASM/native host later | `crates/pi-ext` |
