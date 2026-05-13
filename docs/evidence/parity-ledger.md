@@ -12,7 +12,7 @@ The parity ledger records behavior against the TypeScript Pi baseline and existi
 | Ollama provider execution | must-match-shape | Local `/api/chat` execution path exists; streaming is future work | `crates/pi-providers` |
 | OpenAI-compatible domestic providers | intentional-difference | Moonshot, DeepSeek, and Qwen have real chat-completions execution paths via their OpenAI-compatible APIs | `crates/pi-providers` |
 | Provider-driven tool calls | must-match-shape | OpenAI-compatible providers receive tool schemas, parse function tool calls, and the agent loops tool results back to the provider; structured tool result messages and streaming tool deltas remain future work | `crates/pi-providers`, `crates/pi-agent` |
-| Session format | must-match-shape | Append-only JSONL-like lines, schema to harden later | `crates/pi-session` |
+| Session format and discovery | must-match-shape | Append-only JSONL-like lines with `--continue`, `--resume <ID>`, `--session <ID>`, and `--list-sessions`; schema hardening remains future work | `crates/pi-session`, `crates/pi-cli` |
 | Tool permissions | intentional-difference | Mutating tools require capability checks by default | `crates/pi-permissions`, `crates/pi-tools` |
 | Extension runtime | future | ABI first, JS/WASM/native host later | `crates/pi-ext` |
 | TUI | future | Event boundary first, rich terminal UI later | `crates/pi-tui` |

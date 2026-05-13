@@ -21,5 +21,10 @@ fn jsonl_store_appends_and_loads_messages() {
     assert_eq!(loaded.messages[0].role, Role::User);
     assert_eq!(loaded.messages[1].role, Role::Assistant);
 
+    let sessions = store.list().expect("list sessions");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, "contract");
+    assert_eq!(sessions[0].message_count, 2);
+
     let _ = fs::remove_dir_all(root);
 }

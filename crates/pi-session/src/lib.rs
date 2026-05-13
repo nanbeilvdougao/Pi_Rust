@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use pi_core::{escape_json_string, Message, PiError, PiErrorKind, PiResult, Role};
 
@@ -8,6 +9,13 @@ use pi_core::{escape_json_string, Message, PiError, PiErrorKind, PiResult, Role}
 pub struct Session {
     pub id: String,
     pub messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub id: String,
+    pub message_count: usize,
+    pub updated_ms: u128,
 }
 
 impl Session {
@@ -40,6 +48,47 @@ impl JsonlSessionStore {
 
     pub fn session_path(&self, id: &str) -> PathBuf {
         self.root.join(format!("{id}.jsonl"))
+    }
+
+    pub fn list(&self) -> PiResult<Vec<SessionSummary>> {
+        if !self.root.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut sessions = Vec::new();
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                continue;
+            }
+
+            let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+                continue;
+            };
+
+            let metadata = entry.metadata()?;
+            let updated_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis())
+                .unwrap_or(0);
+
+            sessions.push(SessionSummary {
+                id: stem.to_string(),
+                message_count: count_lines(&path)?,
+                updated_ms,
+            });
+        }
+
+        sessions.sort_by(|left, right| {
+            right
+                .updated_ms
+                .cmp(&left.updated_ms)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(sessions)
     }
 }
 
@@ -136,4 +185,15 @@ fn ensure_safe_session_path(root: &Path, path: &Path) -> PiResult<()> {
             "会话路径不在允许的会话目录内",
         ))
     }
+}
+
+fn count_lines(path: &Path) -> PiResult<usize> {
+    let file = fs::File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut count = 0;
+    for line in reader.lines() {
+        let _ = line?;
+        count += 1;
+    }
+    Ok(count)
 }

@@ -48,6 +48,12 @@ fn run() -> PiResult<()> {
         return Ok(());
     }
 
+    let session_root = default_session_root()?;
+    if parsed.list_sessions {
+        print_sessions(&JsonlSessionStore::new(session_root))?;
+        return Ok(());
+    }
+
     let prompt = parsed.prompt.ok_or_else(|| {
         PiError::new(
             PiErrorKind::InvalidInput,
@@ -69,7 +75,7 @@ fn run() -> PiResult<()> {
 
     ProviderRegistry::builtin().require(&config.model.provider)?;
     let session_id = parsed.session_id.unwrap_or_else(|| "default".to_string());
-    let store = JsonlSessionStore::new(default_session_root()?);
+    let store = JsonlSessionStore::new(session_root);
     let mut agent = AgentRuntime::try_new(config, store)?;
     let turn = agent.run_single_turn(&session_id, &prompt)?;
 
@@ -97,6 +103,7 @@ struct ParsedArgs {
     list_providers: bool,
     list_models: bool,
     list_tools: bool,
+    list_sessions: bool,
     print_mode: bool,
     tools_enabled: bool,
     enabled_tool_names: Option<Vec<String>>,
@@ -115,6 +122,7 @@ impl ParsedArgs {
             list_providers: false,
             list_models: false,
             list_tools: false,
+            list_sessions: false,
             print_mode: false,
             tools_enabled: true,
             enabled_tool_names: None,
@@ -129,10 +137,12 @@ impl ParsedArgs {
             match arg.as_str() {
                 "-h" | "--help" => parsed.help = true,
                 "doctor" if parsed.prompt.is_none() => parsed.doctor = true,
+                "sessions" if parsed.prompt.is_none() => parsed.list_sessions = true,
                 "-V" | "--version" => parsed.version = true,
                 "--list-providers" => parsed.list_providers = true,
                 "--list-models" => parsed.list_models = true,
                 "--list-tools" => parsed.list_tools = true,
+                "--list-sessions" => parsed.list_sessions = true,
                 "-p" | "--print" => parsed.print_mode = true,
                 "--no-tools" => parsed.tools_enabled = false,
                 "--tools" => {
@@ -140,6 +150,7 @@ impl ParsedArgs {
                     parsed.enabled_tool_names = Some(parse_csv(&value));
                 }
                 "--continue" | "-c" => parsed.session_id = Some("default".to_string()),
+                "--resume" => parsed.session_id = Some(next_value(&mut iter, "--resume")?),
                 "--provider" => parsed.provider = next_value(&mut iter, "--provider")?,
                 "--model" => parsed.model = next_value(&mut iter, "--model")?,
                 "--session" => parsed.session_id = Some(next_value(&mut iter, "--session")?),
@@ -194,7 +205,7 @@ fn default_session_root() -> PiResult<PathBuf> {
 
 fn print_help() {
     println!(
-        "Pi Rust\n\n用法:\n  pi [OPTIONS] <MESSAGE>\n  pi doctor\n\n选项:\n  -p, --print              单次输出模式\n  -c, --continue           继续默认会话\n      --session <ID>       使用指定会话 ID\n      --provider <NAME>    设置 provider，默认 echo\n      --model <MODEL>      设置模型，默认 echo-local\n      --tools <LIST>       启用指定工具，逗号分隔\n      --list-providers     列出内置 provider\n      --list-models        列出内置模型预设\n      --list-tools         列出内置工具 schema\n      --no-tools           禁用内置工具\n  -h, --help               显示帮助\n  -V, --version            显示版本\n\n工具快捷方式:\n  /tool read README.md\n  /tool ls ."
+        "Pi Rust\n\n用法:\n  pi [OPTIONS] <MESSAGE>\n  pi doctor\n  pi sessions\n\n选项:\n  -p, --print              单次输出模式\n  -c, --continue           继续默认会话\n      --session <ID>       使用指定会话 ID\n      --resume <ID>        恢复指定会话 ID\n      --provider <NAME>    设置 provider，默认 echo\n      --model <MODEL>      设置模型，默认 echo-local\n      --tools <LIST>       启用指定工具，逗号分隔\n      --list-providers     列出内置 provider\n      --list-models        列出内置模型预设\n      --list-tools         列出内置工具 schema\n      --list-sessions      列出本机会话\n      --no-tools           禁用内置工具\n  -h, --help               显示帮助\n  -V, --version            显示版本\n\n工具快捷方式:\n  /tool read README.md\n  /tool ls ."
     );
 }
 
@@ -233,6 +244,22 @@ fn print_tools() {
             schema.name, mutation, schema.input_shape, schema.description
         );
     }
+}
+
+fn print_sessions(store: &JsonlSessionStore) -> PiResult<()> {
+    let sessions = store.list()?;
+    if sessions.is_empty() {
+        println!("没有会话");
+        return Ok(());
+    }
+
+    for session in sessions {
+        println!(
+            "{}\tmessages: {}\tupdated_ms: {}",
+            session.id, session.message_count, session.updated_ms
+        );
+    }
+    Ok(())
 }
 
 fn print_doctor() -> PiResult<()> {
