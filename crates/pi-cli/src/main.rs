@@ -53,6 +53,28 @@ fn run() -> PiResult<()> {
         print_sessions(&JsonlSessionStore::new(session_root))?;
         return Ok(());
     }
+    let store = JsonlSessionStore::new(session_root);
+    if let Some(id) = parsed.delete_session {
+        let deleted = store.delete(&id)?;
+        println!(
+            "{}",
+            if deleted {
+                format!("已删除会话：{id}")
+            } else {
+                format!("会话不存在：{id}")
+            }
+        );
+        return Ok(());
+    }
+    if let Some((from, to)) = parsed.rename_session {
+        store.rename(&from, &to)?;
+        println!("已重命名会话：{from} -> {to}");
+        return Ok(());
+    }
+    if let Some(id) = parsed.export_session {
+        println!("{}", store.export_markdown(&id)?);
+        return Ok(());
+    }
 
     let prompt = parsed.prompt.ok_or_else(|| {
         PiError::new(
@@ -75,7 +97,6 @@ fn run() -> PiResult<()> {
 
     ProviderRegistry::builtin().require(&config.model.provider)?;
     let session_id = parsed.session_id.unwrap_or_else(|| "default".to_string());
-    let store = JsonlSessionStore::new(session_root);
     let mut agent = AgentRuntime::try_new(config, store)?;
     let turn = agent.run_single_turn(&session_id, &prompt)?;
 
@@ -104,6 +125,9 @@ struct ParsedArgs {
     list_models: bool,
     list_tools: bool,
     list_sessions: bool,
+    delete_session: Option<String>,
+    rename_session: Option<(String, String)>,
+    export_session: Option<String>,
     print_mode: bool,
     tools_enabled: bool,
     enabled_tool_names: Option<Vec<String>>,
@@ -123,6 +147,9 @@ impl ParsedArgs {
             list_models: false,
             list_tools: false,
             list_sessions: false,
+            delete_session: None,
+            rename_session: None,
+            export_session: None,
             print_mode: false,
             tools_enabled: true,
             enabled_tool_names: None,
@@ -143,6 +170,17 @@ impl ParsedArgs {
                 "--list-models" => parsed.list_models = true,
                 "--list-tools" => parsed.list_tools = true,
                 "--list-sessions" => parsed.list_sessions = true,
+                "--delete-session" => {
+                    parsed.delete_session = Some(next_value(&mut iter, "--delete-session")?);
+                }
+                "--rename-session" => {
+                    let from = next_value(&mut iter, "--rename-session <FROM> <TO>")?;
+                    let to = next_value(&mut iter, "--rename-session <FROM> <TO>")?;
+                    parsed.rename_session = Some((from, to));
+                }
+                "--export-session" => {
+                    parsed.export_session = Some(next_value(&mut iter, "--export-session")?);
+                }
                 "-p" | "--print" => parsed.print_mode = true,
                 "--no-tools" => parsed.tools_enabled = false,
                 "--tools" => {
@@ -205,7 +243,7 @@ fn default_session_root() -> PiResult<PathBuf> {
 
 fn print_help() {
     println!(
-        "Pi Rust\n\n用法:\n  pi [OPTIONS] <MESSAGE>\n  pi doctor\n  pi sessions\n\n选项:\n  -p, --print              单次输出模式\n  -c, --continue           继续默认会话\n      --session <ID>       使用指定会话 ID\n      --resume <ID>        恢复指定会话 ID\n      --provider <NAME>    设置 provider，默认 echo\n      --model <MODEL>      设置模型，默认 echo-local\n      --tools <LIST>       启用指定工具，逗号分隔\n      --list-providers     列出内置 provider\n      --list-models        列出内置模型预设\n      --list-tools         列出内置工具 schema\n      --list-sessions      列出本机会话\n      --no-tools           禁用内置工具\n  -h, --help               显示帮助\n  -V, --version            显示版本\n\n工具快捷方式:\n  /tool read README.md\n  /tool ls ."
+        "Pi Rust\n\n用法:\n  pi [OPTIONS] <MESSAGE>\n  pi doctor\n  pi sessions\n\n选项:\n  -p, --print              单次输出模式\n  -c, --continue           继续默认会话\n      --session <ID>       使用指定会话 ID\n      --resume <ID>        恢复指定会话 ID\n      --delete-session <ID> 删除本机会话\n      --rename-session <FROM> <TO> 重命名本机会话\n      --export-session <ID> 以 Markdown 导出会话\n      --provider <NAME>    设置 provider，默认 echo\n      --model <MODEL>      设置模型，默认 echo-local\n      --tools <LIST>       启用指定工具，逗号分隔\n      --list-providers     列出内置 provider\n      --list-models        列出内置模型预设\n      --list-tools         列出内置工具 schema\n      --list-sessions      列出本机会话\n      --no-tools           禁用内置工具\n  -h, --help               显示帮助\n  -V, --version            显示版本\n\n工具快捷方式:\n  /tool read README.md\n  /tool ls ."
     );
 }
 

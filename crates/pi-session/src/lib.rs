@@ -50,6 +50,61 @@ impl JsonlSessionStore {
         self.root.join(format!("{id}.jsonl"))
     }
 
+    pub fn delete(&self, id: &str) -> PiResult<bool> {
+        let path = self.session_path(id);
+        ensure_safe_session_path(&self.root, &path)?;
+        if !path.exists() {
+            return Ok(false);
+        }
+        fs::remove_file(path)?;
+        Ok(true)
+    }
+
+    pub fn rename(&self, from: &str, to: &str) -> PiResult<()> {
+        let from_path = self.session_path(from);
+        let to_path = self.session_path(to);
+        ensure_safe_session_path(&self.root, &from_path)?;
+        ensure_safe_session_path(&self.root, &to_path)?;
+        if !from_path.exists() {
+            return Err(PiError::new(
+                PiErrorKind::Session,
+                format!("会话不存在：{from}"),
+            ));
+        }
+        if to_path.exists() {
+            return Err(PiError::new(
+                PiErrorKind::Session,
+                format!("目标会话已存在：{to}"),
+            ));
+        }
+        fs::rename(from_path, to_path)?;
+        Ok(())
+    }
+
+    pub fn export_markdown(&self, id: &str) -> PiResult<String> {
+        let session = self.load(id)?;
+        if session.messages.is_empty() {
+            return Err(PiError::new(
+                PiErrorKind::Session,
+                format!("会话为空或不存在：{id}"),
+            ));
+        }
+
+        let mut out = format!("# Pi Session: {id}\n\n");
+        for message in session.messages {
+            out.push_str("## ");
+            out.push_str(message.role.as_str());
+            if let Some(tool_call_id) = message.tool_call_id {
+                out.push_str(" ");
+                out.push_str(&tool_call_id);
+            }
+            out.push_str("\n\n");
+            out.push_str(&message.content);
+            out.push_str("\n\n");
+        }
+        Ok(out)
+    }
+
     pub fn list(&self) -> PiResult<Vec<SessionSummary>> {
         if !self.root.exists() {
             return Ok(Vec::new());

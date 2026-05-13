@@ -13,7 +13,7 @@ The parity ledger records behavior against the TypeScript Pi baseline and existi
 | OpenAI-compatible domestic providers | intentional-difference | Moonshot, DeepSeek, and Qwen have real chat-completions execution paths via their OpenAI-compatible APIs | `crates/pi-providers` |
 | Provider-driven tool calls | must-match-shape | OpenAI-compatible providers receive tool schemas, parse function tool calls, and the agent loops tool results back to the provider; streaming tool deltas remain future work | `crates/pi-providers`, `crates/pi-agent` |
 | Structured tool result messages | must-match-shape | Tool results preserve `tool_call_id` and serialize as OpenAI-compatible `role=tool` messages when available | `crates/pi-core`, `crates/pi-agent`, `crates/pi-providers`, `crates/pi-session` |
-| Session format and discovery | must-match-shape | Append-only JSONL-like lines with `--continue`, `--resume <ID>`, `--session <ID>`, and `--list-sessions`; schema hardening remains future work | `crates/pi-session`, `crates/pi-cli` |
+| Session format and discovery | must-match-shape | Append-only JSONL-like lines with `--continue`, `--resume <ID>`, `--session <ID>`, `--list-sessions`, `--delete-session`, `--rename-session`, and `--export-session`; schema hardening remains future work | `crates/pi-session`, `crates/pi-cli` |
 | Tool permissions | intentional-difference | Mutating tools require capability checks by default | `crates/pi-permissions`, `crates/pi-tools` |
 | Extension runtime | future | ABI first, JS/WASM/native host later | `crates/pi-ext` |
 | TUI | future | Event boundary first, rich terminal UI later | `crates/pi-tui` |

@@ -20,6 +20,9 @@ fn help_contains_stable_flags() {
         "--session",
         "--resume",
         "--continue",
+        "--delete-session",
+        "--rename-session",
+        "--export-session",
         "--print",
         "--no-tools",
     ] {

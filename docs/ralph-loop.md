@@ -94,3 +94,19 @@ Why this matters:
 
 - Tool result identity is required for real OpenAI-compatible tool calling parity.
 - This removes a major simplification from the previous provider-driven tool loop.
+
+## Iteration 8
+
+Focus: expand session management beyond list/resume.
+
+Changes:
+
+- Added session deletion.
+- Added session rename.
+- Added Markdown session export.
+- Extended CLI help and session contracts for lifecycle operations.
+
+Why this matters:
+
+- TS Pi-style parity requires session management as a user-facing workflow, not only append/load primitives.
+- Markdown export makes sessions inspectable and portable without introducing a database dependency yet.
