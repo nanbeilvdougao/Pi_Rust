@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use pi_core::{
     escape_json_string, Message, ModelSelection, PiError, PiErrorKind, PiResult, Role,
-    ToolInvocation, ToolSchema,
+    StreamEvent, ToolInvocation, ToolSchema,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +31,7 @@ pub struct ProviderRequest {
 pub struct ProviderResponse {
     pub message: Message,
     pub events: Vec<String>,
+    pub stream_events: Vec<StreamEvent>,
     pub tool_calls: Vec<ToolInvocation>,
 }
 
@@ -65,6 +66,7 @@ impl Provider for EchoProvider {
             return Ok(ProviderResponse {
                 message: Message::new(Role::Assistant, content.clone()),
                 events: vec![content],
+                stream_events: text_stream_events(&content),
                 tool_calls: Vec::new(),
             });
         }
@@ -81,6 +83,7 @@ impl Provider for EchoProvider {
             return Ok(ProviderResponse {
                 message: Message::new(Role::Assistant, String::new()),
                 events: Vec::new(),
+                stream_events: tool_call_stream_events(std::slice::from_ref(&call)),
                 tool_calls: vec![call],
             });
         }
@@ -92,6 +95,7 @@ impl Provider for EchoProvider {
         Ok(ProviderResponse {
             message: Message::new(Role::Assistant, content.clone()),
             events: vec![content],
+            stream_events: text_stream_events(&content),
             tool_calls: Vec::new(),
         })
     }
@@ -133,6 +137,7 @@ impl Provider for OllamaProvider {
         Ok(ProviderResponse {
             message: Message::new(Role::Assistant, content.clone()),
             events: vec![content],
+            stream_events: text_stream_events(&content),
             tool_calls: Vec::new(),
         })
     }
@@ -201,10 +206,16 @@ impl Provider for OpenAiCompatibleProvider {
         } else {
             vec![content.clone()]
         };
+        let stream_events = if tool_calls.is_empty() {
+            text_stream_events(&content)
+        } else {
+            tool_call_stream_events(&tool_calls)
+        };
 
         Ok(ProviderResponse {
             message: Message::new(Role::Assistant, content),
             events,
+            stream_events,
             tool_calls,
         })
     }
@@ -222,6 +233,31 @@ fn parse_echo_tool_call(prompt: &str, tools: &[ToolSchema]) -> Option<ToolInvoca
         name: name.to_string(),
         input: input.to_string(),
     })
+}
+
+fn text_stream_events(content: &str) -> Vec<StreamEvent> {
+    if content.is_empty() {
+        return Vec::new();
+    }
+
+    vec![
+        StreamEvent::MessageStart,
+        StreamEvent::TextDelta(content.to_string()),
+        StreamEvent::MessageDone,
+    ]
+}
+
+fn tool_call_stream_events(calls: &[ToolInvocation]) -> Vec<StreamEvent> {
+    let mut events = vec![StreamEvent::MessageStart];
+    for call in calls {
+        events.push(StreamEvent::ToolCallDelta {
+            id: call.id.clone(),
+            name: Some(call.name.clone()),
+            input_delta: call.input.clone(),
+        });
+    }
+    events.push(StreamEvent::MessageDone);
+    events
 }
 
 #[derive(Debug, Clone)]
@@ -744,5 +780,35 @@ mod tests {
         assert_eq!(calls[0].id.as_deref(), Some("call_1"));
         assert_eq!(calls[0].name, "ls");
         assert_eq!(calls[0].input, ".");
+    }
+
+    #[test]
+    fn stream_events_cover_text_and_tool_calls() {
+        let text_events = text_stream_events("hello");
+        assert_eq!(
+            text_events,
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("hello".to_string()),
+                StreamEvent::MessageDone,
+            ]
+        );
+
+        let tool_events = tool_call_stream_events(&[ToolInvocation {
+            id: Some("call_1".to_string()),
+            name: "ls".to_string(),
+            input: ".".to_string(),
+        }]);
+
+        assert_eq!(tool_events.len(), 3);
+        assert!(matches!(tool_events[0], StreamEvent::MessageStart));
+        assert!(matches!(
+            &tool_events[1],
+            StreamEvent::ToolCallDelta { id, name, input_delta }
+                if id.as_deref() == Some("call_1")
+                    && name.as_deref() == Some("ls")
+                    && input_delta == "."
+        ));
+        assert!(matches!(tool_events[2], StreamEvent::MessageDone));
     }
 }

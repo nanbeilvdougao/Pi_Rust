@@ -1,5 +1,5 @@
 use pi_core::{
-    AppConfig, Event, Message, PiError, PiErrorKind, PiResult, Role, ToolInvocation,
+    AppConfig, Event, Message, PiError, PiErrorKind, PiResult, Role, StreamEvent, ToolInvocation,
 };
 use pi_permissions::{PermissionEngine, PermissionMode};
 use pi_providers::{provider_for, ProviderRequest};
@@ -81,9 +81,7 @@ impl<S: SessionStore> AgentRuntime<S> {
                 tools: tool_schemas.clone(),
             })?;
 
-            for delta in response.events {
-                events.push(Event::AssistantDelta(delta));
-            }
+            append_provider_stream_events(&mut events, &response.stream_events, &response.events);
 
             if response.tool_calls.is_empty() {
                 events.push(Event::AssistantMessage(response.message.content.clone()));
@@ -134,6 +132,26 @@ fn tool_call_from_invocation(invocation: ToolInvocation) -> ToolCall {
     ToolCall {
         name: invocation.name,
         input: invocation.input,
+    }
+}
+
+fn append_provider_stream_events(
+    events: &mut Vec<Event>,
+    stream_events: &[StreamEvent],
+    legacy_deltas: &[String],
+) {
+    if stream_events.is_empty() {
+        for delta in legacy_deltas {
+            events.push(Event::AssistantDelta(delta.clone()));
+        }
+        return;
+    }
+
+    for event in stream_events {
+        events.push(Event::ProviderStream(event.clone()));
+        if let StreamEvent::TextDelta(delta) = event {
+            events.push(Event::AssistantDelta(delta.clone()));
+        }
     }
 }
 

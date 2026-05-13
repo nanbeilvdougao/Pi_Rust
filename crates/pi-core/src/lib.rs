@@ -139,10 +139,23 @@ pub enum Event {
     UserMessage(String),
     AssistantDelta(String),
     AssistantMessage(String),
+    ProviderStream(StreamEvent),
     ToolStarted { name: String },
     ToolFinished { name: String, output: String },
     PermissionDecision { capability: String, allowed: bool },
     SessionSaved { path: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamEvent {
+    MessageStart,
+    TextDelta(String),
+    ToolCallDelta {
+        id: Option<String>,
+        name: Option<String>,
+        input_delta: String,
+    },
+    MessageDone,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

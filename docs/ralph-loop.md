@@ -110,3 +110,20 @@ Why this matters:
 
 - TS Pi-style parity requires session management as a user-facing workflow, not only append/load primitives.
 - Markdown export makes sessions inspectable and portable without introducing a database dependency yet.
+
+## Iteration 9
+
+Focus: introduce a structured provider stream event contract.
+
+Changes:
+
+- Added `StreamEvent` to core events.
+- Provider responses now carry structured stream events in addition to legacy text deltas.
+- Text responses emit message start, text delta, and message done events.
+- Tool calls emit tool-call stream deltas with call identity and input deltas.
+- Agent maps provider stream events into the public event list while preserving existing assistant deltas for compatibility.
+
+Why this matters:
+
+- TUI and RPC parity need structured stream events instead of raw strings.
+- This creates a stable internal contract before implementing true network SSE.

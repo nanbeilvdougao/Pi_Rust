@@ -36,6 +36,10 @@ fn provider_tool_call_runs_tool_and_returns_to_provider() {
         .events
         .iter()
         .any(|event| matches!(event, Event::ToolFinished { name, .. } if name == "ls")));
+    assert!(turn
+        .events
+        .iter()
+        .any(|event| matches!(event, Event::ProviderStream(_))));
     let saw_final = turn.events.iter().any(|event| {
         matches!(event, Event::AssistantMessage(message) if message.contains("工具结果已返回"))
     });
