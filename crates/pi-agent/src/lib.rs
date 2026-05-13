@@ -1,4 +1,6 @@
-use pi_core::{AppConfig, Event, Message, PiResult, Role};
+use pi_core::{
+    AppConfig, Event, Message, PiError, PiErrorKind, PiResult, Role, ToolInvocation,
+};
 use pi_permissions::{PermissionEngine, PermissionMode};
 use pi_providers::{provider_for, ProviderRequest};
 use pi_session::{Session, SessionStore};
@@ -66,23 +68,69 @@ impl<S: SessionStore> AgentRuntime<S> {
         }
 
         let provider = provider_for(&self.config.model)?;
-        let response = provider.complete(ProviderRequest {
-            model: self.config.model.clone(),
-            messages: session.messages.clone(),
-        })?;
+        let tool_schemas = if self.config.tools_enabled {
+            self.tools.schemas()
+        } else {
+            Vec::new()
+        };
 
-        for delta in response.events {
-            events.push(Event::AssistantDelta(delta));
+        for _ in 0..8 {
+            let response = provider.complete(ProviderRequest {
+                model: self.config.model.clone(),
+                messages: session.messages.clone(),
+                tools: tool_schemas.clone(),
+            })?;
+
+            for delta in response.events {
+                events.push(Event::AssistantDelta(delta));
+            }
+
+            if response.tool_calls.is_empty() {
+                events.push(Event::AssistantMessage(response.message.content.clone()));
+                self.session_store.append(session_id, &response.message)?;
+                session.push(response.message);
+                return Ok(AgentTurn { session, events });
+            }
+
+            if !self.config.tools_enabled {
+                return Err(PiError::new(
+                    PiErrorKind::Tool,
+                    "provider 请求调用工具，但当前已禁用工具",
+                ));
+            }
+
+            for invocation in response.tool_calls {
+                let call = tool_call_from_invocation(invocation);
+                events.push(Event::ToolStarted {
+                    name: call.name.clone(),
+                });
+                let output = self.tools.run(call, &mut self.permissions)?;
+                events.push(Event::ToolFinished {
+                    name: output.name.clone(),
+                    output: output.output.clone(),
+                });
+                let tool_message =
+                    Message::new(Role::Tool, format!("{}:\n{}", output.name, output.output));
+                self.session_store.append(session_id, &tool_message)?;
+                session.push(tool_message);
+            }
         }
-        events.push(Event::AssistantMessage(response.message.content.clone()));
-        self.session_store.append(session_id, &response.message)?;
-        session.push(response.message);
 
-        Ok(AgentTurn { session, events })
+        Err(PiError::new(
+            PiErrorKind::Provider,
+            "provider 工具调用超过最大轮数",
+        ))
     }
 
     pub fn tool_schemas(&self) -> Vec<pi_core::ToolSchema> {
         self.tools.schemas()
+    }
+}
+
+fn tool_call_from_invocation(invocation: ToolInvocation) -> ToolCall {
+    ToolCall {
+        name: invocation.name,
+        input: invocation.input,
     }
 }
 

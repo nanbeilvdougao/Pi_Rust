@@ -5,7 +5,10 @@ use std::net::TcpStream;
 use std::process::Command;
 use std::time::Duration;
 
-use pi_core::{escape_json_string, Message, ModelSelection, PiError, PiErrorKind, PiResult, Role};
+use pi_core::{
+    escape_json_string, Message, ModelSelection, PiError, PiErrorKind, PiResult, Role,
+    ToolInvocation, ToolSchema,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderInfo {
@@ -21,12 +24,14 @@ pub struct ProviderInfo {
 pub struct ProviderRequest {
     pub model: ModelSelection,
     pub messages: Vec<Message>,
+    pub tools: Vec<ToolSchema>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderResponse {
     pub message: Message,
     pub events: Vec<String>,
+    pub tool_calls: Vec<ToolInvocation>,
 }
 
 pub trait Provider {
@@ -50,6 +55,20 @@ impl Provider for EchoProvider {
     }
 
     fn complete(&self, request: ProviderRequest) -> PiResult<ProviderResponse> {
+        if let Some(tool_message) = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Tool)
+        {
+            let content = format!("工具结果已返回：{}", tool_message.content);
+            return Ok(ProviderResponse {
+                message: Message::new(Role::Assistant, content.clone()),
+                events: vec![content],
+                tool_calls: Vec::new(),
+            });
+        }
+
         let last_user = request
             .messages
             .iter()
@@ -58,6 +77,14 @@ impl Provider for EchoProvider {
             .map(|message| message.content.as_str())
             .unwrap_or("");
 
+        if let Some(call) = parse_echo_tool_call(last_user, &request.tools) {
+            return Ok(ProviderResponse {
+                message: Message::new(Role::Assistant, String::new()),
+                events: Vec::new(),
+                tool_calls: vec![call],
+            });
+        }
+
         let content = format!(
             "这是 Pi Rust MVP 的本地响应。已收到你的请求：{last_user}"
         );
@@ -65,6 +92,7 @@ impl Provider for EchoProvider {
         Ok(ProviderResponse {
             message: Message::new(Role::Assistant, content.clone()),
             events: vec![content],
+            tool_calls: Vec::new(),
         })
     }
 }
@@ -105,6 +133,7 @@ impl Provider for OllamaProvider {
         Ok(ProviderResponse {
             message: Message::new(Role::Assistant, content.clone()),
             events: vec![content],
+            tool_calls: Vec::new(),
         })
     }
 }
@@ -156,18 +185,43 @@ impl Provider for OpenAiCompatibleProvider {
         })?;
         let body = openai_chat_body(&request);
         let response = post_openai_compatible(self.endpoint, &api_key, &body)?;
-        let content = extract_openai_message_content(&response).ok_or_else(|| {
-            PiError::new(
+        let tool_calls = extract_openai_tool_calls(&response);
+        let content = extract_openai_message_content(&response).unwrap_or_default();
+        if content.is_empty() && tool_calls.is_empty() {
+            return Err(PiError::new(
                 PiErrorKind::Provider,
-                format!("{} 响应中缺少 choices[0].message.content 字段", self.info.id),
-            )
-        })?;
+                format!(
+                    "{} 响应中缺少 choices[0].message.content 或 tool_calls 字段",
+                    self.info.id
+                ),
+            ));
+        }
+        let events = if content.is_empty() {
+            Vec::new()
+        } else {
+            vec![content.clone()]
+        };
 
         Ok(ProviderResponse {
-            message: Message::new(Role::Assistant, content.clone()),
-            events: vec![content],
+            message: Message::new(Role::Assistant, content),
+            events,
+            tool_calls,
         })
     }
+}
+
+fn parse_echo_tool_call(prompt: &str, tools: &[ToolSchema]) -> Option<ToolInvocation> {
+    let rest = prompt.strip_prefix("CALL_TOOL ")?;
+    let (name, input) = rest.split_once(' ')?;
+    if !tools.iter().any(|tool| tool.name == name) {
+        return None;
+    }
+
+    Some(ToolInvocation {
+        id: Some(format!("echo-{name}")),
+        name: name.to_string(),
+        input: input.to_string(),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -335,22 +389,50 @@ fn openai_chat_body(request: &ProviderRequest) -> String {
     let messages = request
         .messages
         .iter()
-        .filter(|message| message.role != Role::Tool)
         .map(|message| {
+            let (role, content) = if message.role == Role::Tool {
+                ("user", format!("Tool result:\n{}", message.content))
+            } else {
+                (message.role.as_str(), message.content.clone())
+            };
             format!(
                 "{{\"role\":\"{}\",\"content\":\"{}\"}}",
-                message.role.as_str(),
-                escape_json_string(&message.content)
+                role,
+                escape_json_string(&content)
             )
         })
         .collect::<Vec<_>>()
         .join(",");
 
+    let tools = openai_tools_body(&request.tools);
+    let tools_suffix = if tools.is_empty() {
+        String::new()
+    } else {
+        format!(",\"tools\":[{tools}],\"tool_choice\":\"auto\"")
+    };
+
     format!(
-        "{{\"model\":\"{}\",\"stream\":false,\"messages\":[{}]}}",
+        "{{\"model\":\"{}\",\"stream\":false,\"messages\":[{}]{}}}",
         escape_json_string(&request.model.model),
-        messages
+        messages,
+        tools_suffix
     )
+}
+
+fn openai_tools_body(tools: &[ToolSchema]) -> String {
+    tools
+        .iter()
+        .map(|tool| {
+            format!(
+                "{{\"type\":\"function\",\"function\":{{\"name\":\"{}\",\"description\":\"{} 输入格式: {}\",\"parameters\":{{\"type\":\"object\",\"properties\":{{\"input\":{{\"type\":\"string\",\"description\":\"工具输入，格式为 {}\"}}}},\"required\":[\"input\"],\"additionalProperties\":false}}}}}}",
+                escape_json_string(&tool.name),
+                escape_json_string(&tool.description),
+                escape_json_string(&tool.input_shape),
+                escape_json_string(&tool.input_shape)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn post_openai_compatible(endpoint: &str, api_key: &str, body: &str) -> PiResult<String> {
@@ -435,7 +517,38 @@ fn extract_ollama_message_content(response: &str) -> Option<String> {
 fn extract_openai_message_content(response: &str) -> Option<String> {
     let message_start = response.find("\"message\"")?;
     let content_part = &response[message_start..];
-    extract_json_field(content_part, "content").map(unescape_json_string)
+    extract_json_string_field(content_part, "content")
+}
+
+fn extract_openai_tool_calls(response: &str) -> Vec<ToolInvocation> {
+    let mut calls = Vec::new();
+    let mut rest = response;
+
+    while let Some(function_idx) = rest.find("\"function\"") {
+        let function_part = &rest[function_idx..];
+        let name = match extract_json_string_field(function_part, "name") {
+            Some(name) => name,
+            None => break,
+        };
+        let arguments = extract_json_string_field(function_part, "arguments").unwrap_or_default();
+        let input = extract_tool_input(&arguments).unwrap_or(arguments);
+        let id_start = function_idx.saturating_sub(512);
+        let id = extract_json_string_field(&rest[id_start..function_idx], "id");
+
+        calls.push(ToolInvocation { id, name, input });
+
+        let advance = function_part
+            .find("\"arguments\"")
+            .map(|idx| idx + "\"arguments\"".len())
+            .unwrap_or(1);
+        rest = &function_part[advance..];
+    }
+
+    calls
+}
+
+fn extract_tool_input(arguments: &str) -> Option<String> {
+    extract_json_string_field(arguments, "input")
 }
 
 fn extract_json_field(input: &str, field: &str) -> Option<String> {
@@ -468,6 +581,62 @@ fn unescape_json_string(input: String) -> String {
     input
 }
 
+fn extract_json_string_field(input: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{field}\"");
+    let field_start = input.find(&needle)? + needle.len();
+    let mut chars = input[field_start..].char_indices();
+
+    for (_, ch) in chars.by_ref() {
+        if ch == ':' {
+            break;
+        }
+        if !ch.is_whitespace() {
+            return None;
+        }
+    }
+
+    let mut value_start = None;
+    for (idx, ch) in chars.by_ref() {
+        if ch == '"' {
+            value_start = Some(field_start + idx + ch.len_utf8());
+            break;
+        }
+        if !ch.is_whitespace() {
+            return None;
+        }
+    }
+
+    decode_json_string(&input[value_start?..])
+}
+
+fn decode_json_string(input: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut escaped = false;
+    for ch in input.chars() {
+        if escaped {
+            out.push(match ch {
+                '"' => '"',
+                '\\' => '\\',
+                '/' => '/',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                'b' => '\u{0008}',
+                'f' => '\u{000c}',
+                other => other,
+            });
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return Some(out);
+        } else {
+            out.push(ch);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,6 +649,7 @@ mod tests {
                 model: "qwen2.5:7b".to_string(),
             },
             messages: vec![Message::new(Role::User, "你好")],
+            tools: Vec::new(),
         };
 
         let body = ollama_chat_body(&request);
@@ -499,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn openai_body_filters_tool_messages() {
+    fn openai_body_includes_tool_results_as_context() {
         let request = ProviderRequest {
             model: ModelSelection {
                 provider: "deepseek".to_string(),
@@ -509,12 +679,14 @@ mod tests {
                 Message::new(Role::User, "解释代码"),
                 Message::new(Role::Tool, "tool output"),
             ],
+            tools: Vec::new(),
         };
 
         let body = openai_chat_body(&request);
         assert!(body.contains("\"model\":\"deepseek-chat\""));
         assert!(body.contains("解释代码"));
-        assert!(!body.contains("tool output"));
+        assert!(body.contains("Tool result"));
+        assert!(body.contains("tool output"));
     }
 
     #[test]
@@ -524,5 +696,43 @@ mod tests {
             extract_openai_message_content(response),
             Some("可以".to_string())
         );
+    }
+
+    #[test]
+    fn openai_body_exposes_function_tools() {
+        let request = ProviderRequest {
+            model: ModelSelection {
+                provider: "deepseek".to_string(),
+                model: "deepseek-chat".to_string(),
+            },
+            messages: vec![Message::new(Role::User, "列目录")],
+            tools: vec![ToolSchema {
+                name: "ls".to_string(),
+                description: "列出目录内容".to_string(),
+                input_shape: "path".to_string(),
+                mutates: false,
+            }],
+        };
+
+        let body = openai_chat_body(&request);
+        assert!(body.contains("\"tools\""));
+        assert!(body.contains("\"tool_choice\":\"auto\""));
+        assert!(body.contains("\"name\":\"ls\""));
+        assert!(body.contains("\"input\""));
+    }
+
+    #[test]
+    fn extracts_openai_tool_calls() {
+        let response = concat!(
+            r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":["#,
+            r#"{"id":"call_1","type":"function","function":{"name":"ls","#,
+            r#""arguments":"{\"input\":\".\"}"}}]}}]}"#
+        );
+        let calls = extract_openai_tool_calls(response);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id.as_deref(), Some("call_1"));
+        assert_eq!(calls[0].name, "ls");
+        assert_eq!(calls[0].input, ".");
     }
 }

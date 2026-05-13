@@ -142,6 +142,13 @@ pub struct ToolSchema {
     pub mutates: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolInvocation {
+    pub id: Option<String>,
+    pub name: String,
+    pub input: String,
+}
+
 pub fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
