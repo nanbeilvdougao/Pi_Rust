@@ -129,6 +129,79 @@ fn handle<'a>(request: &'a Request, agent: &mut AgentRuntime<JsonlSessionStore>)
             ),
             error: None,
         },
+        "list_models" => {
+            // List every (provider, model) pair from the built-in registry.
+            // Callers can also pass `{"provider": "openai"}` to filter.
+            let filter = request
+                .params
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let mut pairs: Vec<Value> = Vec::new();
+            for info in ProviderRegistry::builtin().list() {
+                if filter
+                    .as_deref()
+                    .map(|f| info.id != f)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                for model in &info.supported_models {
+                    pairs.push(serde_json::json!({
+                        "provider": info.id,
+                        "model": model,
+                        "default": &info.default_model == model,
+                    }));
+                }
+            }
+            Response {
+                id: &request.id,
+                result: Some(Value::Array(pairs)),
+                error: None,
+            }
+        }
+        "list_aliases" => {
+            let rows: Vec<Value> = pi_providers::aliases::aliases_table()
+                .iter()
+                .map(|(alias, provider, model)| {
+                    serde_json::json!({
+                        "alias": alias,
+                        "provider": provider,
+                        "model": model,
+                    })
+                })
+                .collect();
+            Response {
+                id: &request.id,
+                result: Some(Value::Array(rows)),
+                error: None,
+            }
+        }
+        "list_sessions" => match agent.session_store().list() {
+            Ok(sessions) => Response {
+                id: &request.id,
+                result: Some(serde_json::to_value(sessions).unwrap_or(Value::Null)),
+                error: None,
+            },
+            Err(err) => Response {
+                id: &request.id,
+                result: None,
+                error: Some(err.to_string()),
+            },
+        },
+        "get_config" => Response {
+            id: &request.id,
+            result: Some(serde_json::to_value(agent.config()).unwrap_or(Value::Null)),
+            error: None,
+        },
+        "cancel" => {
+            agent.cancel();
+            Response {
+                id: &request.id,
+                result: Some(serde_json::json!({"cancelled": true})),
+                error: None,
+            }
+        }
         "complete" => {
             let prompt = request
                 .params

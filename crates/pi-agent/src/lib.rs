@@ -37,6 +37,7 @@ pub mod branch_summary;
 pub mod compaction;
 pub mod fs_watch;
 pub mod hooks;
+pub mod mcp_bridge;
 pub mod settings;
 pub mod skills;
 pub mod slash;
@@ -82,6 +83,10 @@ pub struct AgentRuntime<S: SessionStore> {
     slash: SlashRegistry,
     skills: SkillSet,
     watcher: Option<WorkspaceWatcher>,
+    /// Optional queue of MCP `notifications/progress` events captured by the
+    /// host-side `EventQueueProgressHandler`. Drained into the turn's event
+    /// vec right after each tool call returns.
+    mcp_progress_queue: Option<Arc<std::sync::Mutex<Vec<Event>>>>,
 }
 
 impl<S: SessionStore> AgentRuntime<S> {
@@ -108,7 +113,18 @@ impl<S: SessionStore> AgentRuntime<S> {
             slash,
             skills,
             watcher,
+            mcp_progress_queue: None,
         }
+    }
+
+    pub fn set_mcp_progress_queue(&mut self, queue: Arc<std::sync::Mutex<Vec<Event>>>) {
+        self.mcp_progress_queue = Some(queue);
+    }
+
+    /// Access to the session store. Lets the RPC server expose
+    /// `list_sessions` without forcing every store impl into AgentRuntime.
+    pub fn session_store(&self) -> &S {
+        &self.session_store
     }
 
     pub fn try_new(config: AppConfig, session_store: S) -> PiResult<Self> {
@@ -138,6 +154,7 @@ impl<S: SessionStore> AgentRuntime<S> {
             slash,
             skills,
             watcher,
+            mcp_progress_queue: None,
         })
     }
 
@@ -420,6 +437,15 @@ impl<S: SessionStore> AgentRuntime<S> {
                         continue;
                     }
                 };
+                // Drain any progress events captured by the MCP bridge while
+                // the tool was running so the TUI sees them in order.
+                if let Some(queue) = &self.mcp_progress_queue {
+                    if let Ok(mut buf) = queue.lock() {
+                        for ev in buf.drain(..) {
+                            events.push(ev);
+                        }
+                    }
+                }
                 events.push(Event::ToolFinished {
                     name: output.name.clone(),
                     output: output.output.clone(),
@@ -489,6 +515,31 @@ fn run_tool_inline<S: SessionStore>(
     events: &mut Vec<Event>,
     session_store: &S,
 ) -> PiResult<()> {
+    let hook_ctx = hooks::HookContext {
+        session_id: session_id.to_string(),
+        tool_name: Some(call.name.clone()),
+        tool_input: Some(call.input.clone()),
+        ..hooks::HookContext::default()
+    };
+    if let Some(cwd) = std::env::current_dir().ok() {
+        let outcome = hooks::run(&cwd, hooks::HookPhase::PreTool, &hook_ctx)?;
+        if outcome.ran && outcome.aborts(hooks::HookPhase::PreTool) {
+            let err = format!(
+                "pre-tool hook 拒绝执行（exit {}）{}",
+                outcome.exit_code,
+                if outcome.stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!("：{}", outcome.stderr.trim())
+                }
+            );
+            events.push(Event::ToolError {
+                name: call.name.clone(),
+                error: err.clone(),
+            });
+            return Err(PiError::new(PiErrorKind::PermissionDenied, err));
+        }
+    }
     events.push(Event::ToolStarted {
         name: call.name.clone(),
         input: call.input.clone(),
@@ -498,6 +549,11 @@ fn run_tool_inline<S: SessionStore>(
         name: output.name.clone(),
         output: output.output.clone(),
     });
+    if let Some(cwd) = std::env::current_dir().ok() {
+        let mut post_ctx = hook_ctx;
+        post_ctx.tool_output = Some(output.output.clone());
+        let _ = hooks::run(&cwd, hooks::HookPhase::PostTool, &post_ctx);
+    }
     let tool_message = Message::new(Role::Tool, output.output);
     session_store.append(session_id, &tool_message)?;
     session.push(tool_message);

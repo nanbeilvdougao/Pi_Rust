@@ -118,6 +118,32 @@ pub struct ToolInfo {
     pub mutates: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelInfo {
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub default: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AliasInfo {
+    pub alias: String,
+    pub provider: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionSummary {
+    pub id: String,
+    #[serde(default)]
+    pub message_count: usize,
+    #[serde(default)]
+    pub updated_ms: u128,
+    #[serde(default)]
+    pub last_user_excerpt: Option<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RpcError {
     #[error("spawn pi subprocess failed: {0}")]
@@ -203,6 +229,38 @@ impl PiRpcClient {
         }
         let value = self.call("complete", params)?;
         Ok(serde_json::from_value(value)?)
+    }
+
+    /// `list_models` — provider/model pairs, optionally filtered by provider.
+    pub fn list_models(&mut self, provider: Option<&str>) -> Result<Vec<ModelInfo>, RpcError> {
+        let params = match provider {
+            Some(p) => serde_json::json!({"provider": p}),
+            None => Value::Null,
+        };
+        let value = self.call("list_models", params)?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// `list_aliases` — global alias table (alias → provider/model).
+    pub fn list_aliases(&mut self) -> Result<Vec<AliasInfo>, RpcError> {
+        let value = self.call("list_aliases", Value::Null)?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// `list_sessions` — every session in the active session store.
+    pub fn list_sessions(&mut self) -> Result<Vec<SessionSummary>, RpcError> {
+        let value = self.call("list_sessions", Value::Null)?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// `get_config` — server's current `AppConfig` snapshot.
+    pub fn get_config(&mut self) -> Result<Value, RpcError> {
+        self.call("get_config", Value::Null)
+    }
+
+    /// `cancel` — flip the agent's cancel flag. Returns `{"cancelled": true}`.
+    pub fn cancel(&mut self) -> Result<Value, RpcError> {
+        self.call("cancel", Value::Null)
     }
 
     /// Politely ask the server to exit. The server replies, then closes the

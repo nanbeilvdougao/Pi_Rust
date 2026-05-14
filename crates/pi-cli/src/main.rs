@@ -544,6 +544,22 @@ fn run(cli: Cli) -> PiResult<()> {
         if let Ok(mcp_manager) = pi_mcp::McpManager::load_workspace(&root) {
             if !mcp_manager.server_ids().is_empty() {
                 mcp_manager.register_into(agent.tools_mut());
+                // Install the host-side callback handlers so each MCP server
+                // can issue `sampling/createMessage` requests against our
+                // model and stream `notifications/progress` into the agent's
+                // event channel.
+                let sampling = std::sync::Arc::new(
+                    pi_agent::mcp_bridge::AgentSamplingHandler::new(agent.config().clone()),
+                );
+                let (progress_queue, progress_handler) =
+                    pi_agent::mcp_bridge::EventQueueProgressHandler::new();
+                for id in mcp_manager.server_ids() {
+                    if let Some(server) = mcp_manager.server(&id) {
+                        server.set_sampling_handler(sampling.clone());
+                        server.set_progress_handler(progress_handler.clone());
+                    }
+                }
+                agent.set_mcp_progress_queue(progress_queue);
                 // Manager kept alive in a static for the process lifetime so
                 // child processes do not get killed mid-conversation.
                 let leaked: &'static pi_mcp::McpManager = Box::leak(Box::new(mcp_manager));

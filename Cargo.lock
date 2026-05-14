@@ -1918,6 +1918,7 @@ name = "pi-agent"
 version = "0.1.0"
 dependencies = [
  "pi-core",
+ "pi-mcp",
  "pi-permissions",
  "pi-providers",
  "pi-session",
