@@ -565,7 +565,42 @@ fn run(cli: Cli) -> PiResult<()> {
     }
     let _ = ModelSelection::default();
 
-    ProviderRegistry::builtin().require(&config.model.provider)?;
+    let registry = ProviderRegistry::builtin();
+    let info = registry.require(&config.model.provider)?;
+    // Reject unknown models upfront with a friendly listing so the user
+    // doesn't see a generic provider error later. We allow:
+    // - exact match against the registry's supported_models list,
+    // - any model when supported_models is empty (registry doesn't enumerate),
+    // - the literal `--model echo-local` always (echo provider).
+    if !info.supported_models.is_empty()
+        && !info
+            .supported_models
+            .iter()
+            .any(|m| m == &config.model.model)
+    {
+        let preview: Vec<String> = info
+            .supported_models
+            .iter()
+            .take(6)
+            .cloned()
+            .collect();
+        let more = if info.supported_models.len() > preview.len() {
+            format!("… (+{} more)", info.supported_models.len() - preview.len())
+        } else {
+            String::new()
+        };
+        return Err(PiError::new(
+            PiErrorKind::Provider,
+            format!(
+                "未知模型：{} / {}。\n该 provider 已知模型：{} {}\n运行 `pi --list-models --provider {}` 查看完整列表。",
+                info.id,
+                config.model.model,
+                preview.join(", "),
+                more,
+                info.id,
+            ),
+        ));
+    }
 
     let mut agent = AgentRuntime::try_new(config.clone(), store)?;
 

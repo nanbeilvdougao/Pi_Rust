@@ -34,7 +34,15 @@ pub enum SandboxBackend {
     Bwrap,
     Firejail,
     SandboxExec,
-    WindowsJob,
+    /// Windows: no OS-level isolation is implemented yet. Detection returns
+    /// this variant so callers can render an honest "best-effort" status,
+    /// but the runtime relies entirely on `PermissionEngine` + the dangerous-
+    /// target blocklist — no Job Object, no AppContainer, no token
+    /// restriction. Wiring `windows::Win32::System::JobObjects` is tracked
+    /// as future work; renaming the variant from `WindowsJob` to
+    /// `WindowsBestEffort` removes the implicit claim that a Job Object
+    /// is actually in play.
+    WindowsBestEffort,
 }
 
 pub fn detect_backend() -> SandboxBackend {
@@ -54,7 +62,7 @@ pub fn detect_backend() -> SandboxBackend {
         return SandboxBackend::None;
     }
     if cfg!(target_os = "windows") {
-        return SandboxBackend::WindowsJob;
+        return SandboxBackend::WindowsBestEffort;
     }
     SandboxBackend::None
 }
@@ -77,10 +85,10 @@ pub fn apply_sandbox(command: &mut Command, profile: &SandboxProfile) -> Sandbox
         SandboxBackend::Bwrap => apply_bwrap(command, profile),
         SandboxBackend::Firejail => apply_firejail(command, profile),
         SandboxBackend::SandboxExec => apply_sandbox_exec(command, profile),
-        SandboxBackend::WindowsJob => {
-            // Job-object affinity is set when the process spawns; nothing
-            // to inject here. We still hand back the chosen backend so
-            // the caller can log "best-effort" status.
+        SandboxBackend::WindowsBestEffort => {
+            // No isolation injected. The caller still owns the permission
+            // engine + dangerous-target blocklist; this branch exists so
+            // the returned backend honestly reflects the platform.
         }
         SandboxBackend::None => {}
     }
@@ -223,7 +231,7 @@ mod tests {
                 | SandboxBackend::Bwrap
                 | SandboxBackend::Firejail
                 | SandboxBackend::SandboxExec
-                | SandboxBackend::WindowsJob
+                | SandboxBackend::WindowsBestEffort
         );
     }
 
