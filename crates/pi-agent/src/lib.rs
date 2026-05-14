@@ -36,6 +36,7 @@ use pi_tools::{ToolCall, ToolRuntime};
 pub mod branch_summary;
 pub mod compaction;
 pub mod fs_watch;
+pub mod hooks;
 pub mod settings;
 pub mod skills;
 pub mod slash;
@@ -181,6 +182,29 @@ impl<S: SessionStore> AgentRuntime<S> {
     ) -> PiResult<AgentTurn> {
         self.reset_cancel();
         self.refresh_from_watcher();
+        // pre-turn hook — aborts the whole turn on non-zero exit.
+        if let Some(cwd) = std::env::current_dir().ok() {
+            let ctx = hooks::HookContext {
+                session_id: session_id.to_string(),
+                prompt: Some(prompt.to_string()),
+                ..hooks::HookContext::default()
+            };
+            let outcome = hooks::run(&cwd, hooks::HookPhase::PreTurn, &ctx)?;
+            if outcome.ran && outcome.aborts(hooks::HookPhase::PreTurn) {
+                return Err(PiError::new(
+                    PiErrorKind::PermissionDenied,
+                    format!(
+                        "pre-turn hook 拒绝执行（exit {}）{}",
+                        outcome.exit_code,
+                        if outcome.stderr.is_empty() {
+                            String::new()
+                        } else {
+                            format!("：{}", outcome.stderr.trim())
+                        }
+                    ),
+                ));
+            }
+        }
         let mut events = vec![Event::UserMessage(prompt.to_string())];
         let session_existing = self.session_store.load(session_id)?;
         // Restore session's recorded cwd before the turn so file paths in the
@@ -296,9 +320,20 @@ impl<S: SessionStore> AgentRuntime<S> {
 
             if response.tool_calls.is_empty() {
                 let assistant_message = response.message.clone();
-                events.push(Event::AssistantMessage(assistant_message.content.clone()));
+                let assistant_content = assistant_message.content.clone();
+                events.push(Event::AssistantMessage(assistant_content.clone()));
                 self.session_store.append(session_id, &assistant_message)?;
                 session.push(assistant_message);
+                // post-turn hook — advisory, exit code is logged but not fatal.
+                if let Some(cwd) = std::env::current_dir().ok() {
+                    let ctx = hooks::HookContext {
+                        session_id: session_id.to_string(),
+                        prompt: Some(prompt.to_string()),
+                        tool_output: Some(assistant_content),
+                        ..hooks::HookContext::default()
+                    };
+                    let _ = hooks::run(&cwd, hooks::HookPhase::PostTurn, &ctx);
+                }
                 return Ok(AgentTurn {
                     session,
                     events,
@@ -329,6 +364,37 @@ impl<S: SessionStore> AgentRuntime<S> {
                 }
                 let tool_call_id = invocation.id.clone();
                 let call = tool_call_from_invocation(invocation);
+                // pre-tool hook — abort the call if the script exits non-zero.
+                let hook_ctx = hooks::HookContext {
+                    session_id: session_id.to_string(),
+                    tool_name: Some(call.name.clone()),
+                    tool_input: Some(call.input.clone()),
+                    ..hooks::HookContext::default()
+                };
+                if let Some(cwd) = std::env::current_dir().ok() {
+                    let outcome = hooks::run(&cwd, hooks::HookPhase::PreTool, &hook_ctx)?;
+                    if outcome.ran && outcome.aborts(hooks::HookPhase::PreTool) {
+                        events.push(Event::ToolError {
+                            name: call.name.clone(),
+                            error: format!(
+                                "pre-tool hook 拒绝执行（exit {}）{}",
+                                outcome.exit_code,
+                                if outcome.stderr.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("：{}", outcome.stderr.trim())
+                                }
+                            ),
+                        });
+                        let blocked_message = Message::tool_result(
+                            tool_call_id.clone(),
+                            format!("BLOCKED_BY_HOOK: pre-tool exit {}", outcome.exit_code),
+                        );
+                        self.session_store.append(session_id, &blocked_message)?;
+                        session.push(blocked_message);
+                        continue;
+                    }
+                }
                 events.push(Event::ToolStarted {
                     name: call.name.clone(),
                     input: call.input.clone(),
@@ -345,6 +411,12 @@ impl<S: SessionStore> AgentRuntime<S> {
                             Message::tool_result(tool_call_id.clone(), format!("ERROR: {err}"));
                         self.session_store.append(session_id, &error_message)?;
                         session.push(error_message);
+                        // Still run post-tool hook on error so observers can react.
+                        if let Some(cwd) = std::env::current_dir().ok() {
+                            let mut post_ctx = hook_ctx.clone();
+                            post_ctx.tool_output = Some(format!("ERROR: {err}"));
+                            let _ = hooks::run(&cwd, hooks::HookPhase::PostTool, &post_ctx);
+                        }
                         continue;
                     }
                 };
@@ -352,6 +424,11 @@ impl<S: SessionStore> AgentRuntime<S> {
                     name: output.name.clone(),
                     output: output.output.clone(),
                 });
+                if let Some(cwd) = std::env::current_dir().ok() {
+                    let mut post_ctx = hook_ctx;
+                    post_ctx.tool_output = Some(output.output.clone());
+                    let _ = hooks::run(&cwd, hooks::HookPhase::PostTool, &post_ctx);
+                }
                 let tool_message = Message::tool_result(tool_call_id, output.output);
                 self.session_store.append(session_id, &tool_message)?;
                 session.push(tool_message);

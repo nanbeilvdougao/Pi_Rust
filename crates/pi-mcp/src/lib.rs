@@ -55,6 +55,7 @@ struct Request<'a> {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct Response {
     #[serde(default)]
     id: Option<u64>,
@@ -65,6 +66,7 @@ struct Response {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct JsonRpcError {
     #[allow(dead_code)]
     code: i32,
@@ -79,6 +81,29 @@ pub struct McpServer {
     resources: Vec<RemoteResource>,
     prompts: Vec<RemotePrompt>,
     capabilities: ServerCapabilities,
+    sampling: Arc<Mutex<Option<Arc<dyn SamplingHandler>>>>,
+    progress: Arc<Mutex<Option<Arc<dyn ProgressHandler>>>>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Host-side handler for inbound `sampling/createMessage` requests. MCP
+/// servers use this RPC to ask Pi (the client) to run an LLM completion on
+/// their behalf — for example, an MCP "summarizer" server that wants to
+/// reuse the user's model instead of bundling its own.
+pub trait SamplingHandler: Send + Sync {
+    /// Called once per inbound `sampling/createMessage` request. Receives
+    /// the raw JSON params (per MCP spec: `messages`, `modelPreferences`,
+    /// `systemPrompt`, `includeContext`, `maxTokens`, …). Returns the
+    /// result body that becomes `{"role":"assistant","content":{type,text}}`
+    /// on the wire.
+    fn create_message(&self, params: Value) -> PiResult<Value>;
+}
+
+/// Host-side dispatcher for inbound `notifications/progress` notifications.
+/// Lets MCP tools surface long-running progress into the agent event stream
+/// without us needing to plumb it through every individual tool call site.
+pub trait ProgressHandler: Send + Sync {
+    fn on_progress(&self, server_id: &str, params: Value);
 }
 
 /// Capability flags advertised by the remote server's `initialize` response.
@@ -217,7 +242,48 @@ impl McpServer {
             resources,
             prompts,
             capabilities,
+            sampling: Arc::new(Mutex::new(None)),
+            progress: Arc::new(Mutex::new(None)),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
+    }
+
+    /// Plug a sampling handler. The host typically wires this to a closure
+    /// that runs `AgentRuntime::run_single_turn` against the server's
+    /// requested model and returns the final assistant content.
+    pub fn set_sampling_handler(&self, handler: Arc<dyn SamplingHandler>) {
+        if let Ok(mut guard) = self.sampling.lock() {
+            *guard = Some(handler);
+        }
+    }
+
+    /// Plug a progress handler. Inbound `notifications/progress` are
+    /// forwarded here so the agent can emit `Event::ToolProgress` for the
+    /// streaming widget.
+    pub fn set_progress_handler(&self, handler: Arc<dyn ProgressHandler>) {
+        if let Ok(mut guard) = self.progress.lock() {
+            *guard = Some(handler);
+        }
+    }
+
+    /// Send a `$/cancelRequest` notification for the in-flight outbound
+    /// request id. The server is expected to abort cooperatively; we also
+    /// flip the local cancel flag so any blocking read returns promptly.
+    pub fn cancel_in_flight(&self, request_id: u64) -> PiResult<()> {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Self::notify(
+            &self.inner,
+            "$/cancelRequest",
+            json!({"id": request_id}),
+        )
+    }
+
+    /// Returns and clears the cancel flag. Used by call_tool to short-
+    /// circuit before sending a new request.
+    pub fn take_cancel(&self) -> bool {
+        self.cancelled
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn id(&self) -> &str {
@@ -242,6 +308,22 @@ impl McpServer {
         method: &str,
         params: Value,
     ) -> PiResult<Value> {
+        Self::rpc_request_full(inner, method, params, None, None, None, "")
+    }
+
+    /// Like `rpc_request` but with handlers for server-initiated requests
+    /// (`sampling/createMessage`) and notifications (`notifications/progress`,
+    /// `$/cancelRequest`). Pass `None` for handlers you don't want to wire.
+    #[allow(clippy::too_many_arguments)]
+    fn rpc_request_full(
+        inner: &Arc<Mutex<ServerInner>>,
+        method: &str,
+        params: Value,
+        sampling: Option<Arc<dyn SamplingHandler>>,
+        progress: Option<Arc<dyn ProgressHandler>>,
+        cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
+        server_id: &str,
+    ) -> PiResult<Value> {
         let mut guard = inner
             .lock()
             .map_err(|err| PiError::new(PiErrorKind::Tool, format!("MCP lock 失败：{err}")))?;
@@ -262,6 +344,14 @@ impl McpServer {
             PiError::new(PiErrorKind::Tool, format!("MCP stdin flush 失败：{err}"))
         })?;
         loop {
+            if let Some(flag) = &cancelled {
+                if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(PiError::new(
+                        PiErrorKind::Cancelled,
+                        format!("MCP {method} 已取消"),
+                    ));
+                }
+            }
             let mut buf = String::new();
             let n = guard.reader.read_line(&mut buf).map_err(|err| {
                 PiError::new(PiErrorKind::Tool, format!("读取 MCP stdout 失败：{err}"))
@@ -276,18 +366,87 @@ impl McpServer {
             if trimmed.is_empty() {
                 continue;
             }
-            let response: Response = serde_json::from_str(trimmed)?;
-            if response.id == Some(id) {
-                if let Some(err) = response.error {
-                    return Err(PiError::new(
-                        PiErrorKind::Tool,
-                        format!("MCP {method} 失败：{}", err.message),
-                    ));
-                }
-                return Ok(response.result.unwrap_or(Value::Null));
+            let frame: Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            // 1. Server-initiated request (method + id present).
+            if frame.get("method").is_some() && frame.get("id").is_some() {
+                let req_id = frame.get("id").cloned().unwrap_or(Value::Null);
+                let req_method = frame
+                    .get("method")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let req_params = frame.get("params").cloned().unwrap_or(Value::Null);
+                let response_value = match req_method.as_str() {
+                    "sampling/createMessage" => match &sampling {
+                        Some(handler) => match handler.create_message(req_params) {
+                            Ok(value) => json!({"jsonrpc": "2.0", "id": req_id, "result": value}),
+                            Err(err) => json!({
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "error": {"code": -32000, "message": err.message}
+                            }),
+                        },
+                        None => json!({
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "error": {"code": -32601, "message": "sampling 未启用"}
+                        }),
+                    },
+                    other => json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {"code": -32601, "message": format!("未实现的 server→client 方法：{other}")}
+                    }),
+                };
+                let mut line = serde_json::to_string(&response_value)?;
+                line.push('\n');
+                guard.stdin.write_all(line.as_bytes()).map_err(|err| {
+                    PiError::new(PiErrorKind::Tool, format!("写入 server-request 响应失败：{err}"))
+                })?;
+                guard.stdin.flush().map_err(|err| {
+                    PiError::new(PiErrorKind::Tool, format!("flush 失败：{err}"))
+                })?;
+                continue;
             }
-            // Notifications and unrelated responses get dropped — fine for
-            // our single-flight call pattern.
+            // 2. Server-initiated notification (method, no id).
+            if frame.get("method").is_some() && frame.get("id").is_none() {
+                let notif_method = frame
+                    .get("method")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if notif_method == "notifications/progress" {
+                    if let Some(handler) = &progress {
+                        handler.on_progress(
+                            server_id,
+                            frame.get("params").cloned().unwrap_or(Value::Null),
+                        );
+                    }
+                }
+                // `$/cancelRequest` from server toward client is a request to
+                // cancel an outbound id; since the outbound id != our id, we
+                // just ignore (no second outbound is in flight here).
+                continue;
+            }
+            // 3. Response (id present, no method) — match against ours.
+            if let Some(resp_id) = frame.get("id").and_then(|v| v.as_u64()) {
+                if resp_id == id {
+                    if let Some(err) = frame.get("error") {
+                        let message = err
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        return Err(PiError::new(
+                            PiErrorKind::Tool,
+                            format!("MCP {method} 失败：{message}"),
+                        ));
+                    }
+                    return Ok(frame.get("result").cloned().unwrap_or(Value::Null));
+                }
+            }
         }
     }
 
@@ -375,7 +534,7 @@ impl McpServer {
                 format!("MCP server {} 未声明 resources 能力", self.id),
             ));
         }
-        Self::rpc_request(&self.inner, "resources/read", json!({"uri": uri}))
+        self.rpc_with_handlers("resources/read", json!({"uri": uri}))
     }
 
     /// Materialize a prompt via `prompts/get`.
@@ -386,10 +545,26 @@ impl McpServer {
                 format!("MCP server {} 未声明 prompts 能力", self.id),
             ));
         }
-        Self::rpc_request(
-            &self.inner,
+        self.rpc_with_handlers(
             "prompts/get",
             json!({"name": name, "arguments": arguments}),
+        )
+    }
+
+    /// Run an RPC with the host's current sampling / progress / cancel
+    /// handlers wired in. Used by every post-spawn call so server-initiated
+    /// requests routed back to the host actually reach a handler.
+    fn rpc_with_handlers(&self, method: &str, params: Value) -> PiResult<Value> {
+        let sampling = self.sampling.lock().ok().and_then(|g| g.clone());
+        let progress = self.progress.lock().ok().and_then(|g| g.clone());
+        Self::rpc_request_full(
+            &self.inner,
+            method,
+            params,
+            sampling,
+            progress,
+            Some(self.cancelled.clone()),
+            &self.id,
         )
     }
 
@@ -406,8 +581,7 @@ impl McpServer {
     }
 
     pub fn call_tool(&self, tool_name: &str, arguments: Value) -> PiResult<String> {
-        let result = Self::rpc_request(
-            &self.inner,
+        let result = self.rpc_with_handlers(
             "tools/call",
             json!({"name": tool_name, "arguments": arguments}),
         )?;
@@ -695,6 +869,88 @@ for line in sys.stdin:
             .and_then(|v| v.as_str())
             .unwrap_or("");
         assert!(text.contains("rust"));
+    }
+
+    fn write_python_sampling_server(dir: &Path) -> std::path::PathBuf {
+        let path = dir.join("sampling_server.py");
+        fs::write(
+            &path,
+            r#"
+import sys
+import json
+
+def send(payload):
+    sys.stdout.write(json.dumps(payload) + "\n")
+    sys.stdout.flush()
+
+state = {"sampled": None}
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method")
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":req["id"],"result":{"capabilities":{"tools":{},"sampling":{}},"serverInfo":{"name":"s","version":"0.0.1"}}})
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0","id":req["id"],"result":{"tools":[{"name":"ask","description":"ask host","inputSchema":{}}]}})
+    elif method == "tools/call":
+        # Server-initiated sampling request first, then return the result.
+        send({"jsonrpc":"2.0","id":1000,"method":"sampling/createMessage","params":{"messages":[{"role":"user","content":{"type":"text","text":"summarize"}}]}})
+        # Wait for the response from the host on next line.
+        # The host posts back via its stdin (which is our stdin too).
+        reply_line = sys.stdin.readline().strip()
+        reply = json.loads(reply_line)
+        state["sampled"] = reply.get("result")
+        send({"jsonrpc":"2.0","id":req["id"],"result":{"content":[{"type":"text","text":"got:" + json.dumps(state["sampled"])}]}})
+    elif method == "$/cancelRequest":
+        pass
+    elif method and method.startswith("notifications/"):
+        pass
+    else:
+        send({"jsonrpc":"2.0","id":req.get("id"),"error":{"code":-32601,"message":"unknown"}})
+"#,
+        )
+        .unwrap();
+        path
+    }
+
+    struct EchoSampler;
+    impl SamplingHandler for EchoSampler {
+        fn create_message(&self, _params: Value) -> PiResult<Value> {
+            Ok(json!({
+                "role": "assistant",
+                "content": {"type": "text", "text": "from-host"}
+            }))
+        }
+    }
+
+    #[test]
+    fn sampling_request_round_trips_to_host_handler() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let script = write_python_sampling_server(dir.path());
+        let config = McpConfig {
+            servers: vec![ServerSpec {
+                id: "s".to_string(),
+                command: "python3".to_string(),
+                args: vec![script.display().to_string()],
+                env: BTreeMap::new(),
+            }],
+        };
+        let manager = McpManager::from_config(&config).expect("spawn");
+        let server = manager.server("s").expect("server").clone();
+        server.set_sampling_handler(Arc::new(EchoSampler));
+        let output = server
+            .call_tool("ask", json!({}))
+            .expect("call");
+        assert!(output.contains("from-host"), "got: {output}");
     }
 
     #[test]
