@@ -1,5 +1,6 @@
-//! Lightweight file-mtime watcher used to hot-reload `.pi/skills/*.md` and
-//! `.pi/commands/*.md` without restarting `pi`.
+//! Lightweight file-mtime watcher used to hot-reload `.pi/skills/*.md`,
+//! `.pi/commands/*.md`, `.pi/agents/*.toml`, `.pi/prompts/*.md`,
+//! `.pi/resources/*`, and `.pi/hooks/*` without restarting `pi`.
 //!
 //! TS pi uses `chokidar` which wraps native APIs (kqueue/inotify/FSEvents).
 //! We avoid pulling `notify`'s native deps by doing 1-second mtime polling
@@ -117,7 +118,16 @@ fn run_loop(root: PathBuf, state: Arc<Mutex<WatchedState>>, stop: Arc<AtomicBool
 
 fn scan_fingerprints(root: &Path) -> HashMap<PathBuf, FileFingerprint> {
     let mut map = HashMap::new();
-    for sub in [".pi/skills", ".pi/commands"] {
+    // (dir, extension_filter). `None` accepts every regular file.
+    let watch_specs: &[(&str, Option<&str>)] = &[
+        (".pi/skills", Some("md")),
+        (".pi/commands", Some("md")),
+        (".pi/agents", None),
+        (".pi/prompts", Some("md")),
+        (".pi/resources", None),
+        (".pi/hooks", None),
+    ];
+    for (sub, ext_filter) in watch_specs {
         let dir = root.join(sub);
         let entries = match std::fs::read_dir(&dir) {
             Ok(it) => it,
@@ -125,7 +135,12 @@ fn scan_fingerprints(root: &Path) -> HashMap<PathBuf, FileFingerprint> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            if let Some(filter) = ext_filter {
+                if path.extension().and_then(|s| s.to_str()) != Some(*filter) {
+                    continue;
+                }
+            }
+            if !path.is_file() {
                 continue;
             }
             if let Ok(meta) = entry.metadata() {
@@ -199,6 +214,26 @@ mod tests {
         // Ensure mtime resolution moves.
         std::thread::sleep(std::time::Duration::from_millis(15));
         fs::write(skills.join("a.md"), "v2-changed").unwrap();
+        let snap2 = scan_fingerprints(dir.path());
+        assert_ne!(snap1, snap2);
+    }
+
+    #[test]
+    fn fingerprint_includes_resources_prompts_agents_hooks() {
+        let dir = tempdir().unwrap();
+        let pi_dir = dir.path().join(".pi");
+        fs::create_dir_all(pi_dir.join("resources")).unwrap();
+        fs::create_dir_all(pi_dir.join("prompts")).unwrap();
+        fs::create_dir_all(pi_dir.join("agents")).unwrap();
+        fs::create_dir_all(pi_dir.join("hooks")).unwrap();
+        fs::write(pi_dir.join("resources").join("note.txt"), "v1").unwrap();
+        fs::write(pi_dir.join("prompts").join("greet.md"), "Hi").unwrap();
+        fs::write(pi_dir.join("agents").join("planner.toml"), "name = 'plan'").unwrap();
+        fs::write(pi_dir.join("hooks").join("pre-tool"), "#!/bin/sh\n").unwrap();
+        let snap1 = scan_fingerprints(dir.path());
+        assert_eq!(snap1.len(), 4);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        fs::write(pi_dir.join("resources").join("note.txt"), "v2-CHANGED").unwrap();
         let snap2 = scan_fingerprints(dir.path());
         assert_ne!(snap1, snap2);
     }

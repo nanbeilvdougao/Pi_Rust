@@ -24,10 +24,18 @@
 //! manager keeps a long-running child process per server so the agent can
 //! re-use a single MCP handshake across many tool invocations.
 //!
-//! What we deliberately do *not* implement here (yet): MCP `resources`,
-//! `prompts`, sampling notifications, SSE transport, capability negotiation
-//! flags beyond `tools/list`. Adding them is additive — they map onto the
-//! same JSON-RPC frame loop.
+//! Beyond `tools/*`, the client also implements:
+//! - `resources/list` + `resources/read` (advertised under `capabilities.resources`).
+//! - `prompts/list` + `prompts/get` (advertised under `capabilities.prompts`).
+//! - Inbound `sampling/createMessage` via `SamplingHandler` so an MCP server
+//!   can borrow the host's model for its own reasoning.
+//! - `notifications/progress` dispatch via `ProgressHandler` so long-running
+//!   remote tools surface progress into the agent's event stream.
+//! - `$/cancelRequest` outbound + an `AtomicBool` cancel flag honoured by
+//!   the rpc read loop.
+//!
+//! Still out of scope: SSE transport (stdio only), HTTP transport, and the
+//! optional `logging` capability beyond capturing it in `ServerCapabilities`.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};

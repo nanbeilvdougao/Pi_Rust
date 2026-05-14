@@ -53,6 +53,30 @@ pub struct OAuthTokens {
     pub expires_in: Option<u64>,
     #[serde(default)]
     pub scope: Option<String>,
+    /// Absolute expiry timestamp (seconds since UNIX epoch). Populated by
+    /// `run` and `refresh`; older serialized tokens omit it which we treat
+    /// as "expires unknown — refresh on first 401".
+    #[serde(default)]
+    pub expires_at_unix: Option<u64>,
+}
+
+impl OAuthTokens {
+    /// Whether the token is past (or close to) its expiry. We rebuild access
+    /// tokens when fewer than 60 seconds remain to avoid races with the
+    /// upstream clock.
+    pub fn needs_refresh(&self) -> bool {
+        match self.expires_at_unix {
+            Some(at) => current_unix() + 60 >= at,
+            None => false,
+        }
+    }
+}
+
+fn current_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Run the full PKCE flow synchronously and return the resulting tokens.
@@ -218,14 +242,36 @@ fn exchange_code(
         urlencode(redirect_uri),
         urlencode(verifier),
     );
-    // We use a raw TcpStream + HTTPS handshake-by-curl path? No — we already
-    // ship `ureq`. But `pi-auth` does not depend on `ureq`. Build a tiny
-    // helper here that uses ureq via a feature, or shell out to curl.
+    let mut tokens = post_token_request(&config.token_endpoint, &body)?;
+    stamp_expiry(&mut tokens);
+    Ok(tokens)
+}
+
+/// Exchange a `refresh_token` for a fresh `access_token`. Returns the new
+/// tokens (which usually keep the same `refresh_token` but providers MAY
+/// rotate it; we preserve the new one when present).
+pub fn refresh(config: &OAuthConfig, refresh_token: &str) -> PiResult<OAuthTokens> {
+    let body = format!(
+        "grant_type=refresh_token&client_id={}&refresh_token={}",
+        urlencode(&config.client_id),
+        urlencode(refresh_token),
+    );
+    let mut tokens = post_token_request(&config.token_endpoint, &body)?;
+    if tokens.refresh_token.is_none() {
+        // Most IdPs omit `refresh_token` from the refresh response; keep the
+        // old one so the caller can refresh again later.
+        tokens.refresh_token = Some(refresh_token.to_string());
+    }
+    stamp_expiry(&mut tokens);
+    Ok(tokens)
+}
+
+fn post_token_request(token_endpoint: &str, body: &str) -> PiResult<OAuthTokens> {
     let agent = ureq_shim::agent();
     let response = agent
-        .post(&config.token_endpoint)
+        .post(token_endpoint)
         .set("content-type", "application/x-www-form-urlencoded")
-        .send_string(&body)
+        .send_string(body)
         .map_err(|err| PiError::new(PiErrorKind::Network, format!("token 交换失败：{err}")))?;
     let text = response
         .into_string()
@@ -237,6 +283,12 @@ fn exchange_code(
         )
     })?;
     Ok(tokens)
+}
+
+fn stamp_expiry(tokens: &mut OAuthTokens) {
+    if let Some(expires_in) = tokens.expires_in {
+        tokens.expires_at_unix = Some(current_unix().saturating_add(expires_in));
+    }
 }
 
 mod ureq_shim {
@@ -395,5 +447,49 @@ mod tests {
     fn base64url_encodes_known_value() {
         assert_eq!(base64url(&[0xff, 0xff, 0xff]), "____");
         assert_eq!(base64url(b"hi"), "aGk");
+    }
+
+    #[test]
+    fn needs_refresh_returns_true_just_before_expiry() {
+        let now = current_unix();
+        let tokens = OAuthTokens {
+            access_token: "x".into(),
+            refresh_token: Some("r".into()),
+            token_type: None,
+            expires_in: Some(60),
+            scope: None,
+            expires_at_unix: Some(now + 30), // 30s away → inside the 60s buffer
+        };
+        assert!(tokens.needs_refresh());
+    }
+
+    #[test]
+    fn needs_refresh_returns_false_when_far_from_expiry() {
+        let now = current_unix();
+        let tokens = OAuthTokens {
+            access_token: "x".into(),
+            refresh_token: Some("r".into()),
+            token_type: None,
+            expires_in: Some(3600),
+            scope: None,
+            expires_at_unix: Some(now + 3000),
+        };
+        assert!(!tokens.needs_refresh());
+    }
+
+    #[test]
+    fn stamp_expiry_writes_expires_at_unix_when_expires_in_present() {
+        let mut tokens = OAuthTokens {
+            access_token: "x".into(),
+            refresh_token: None,
+            token_type: None,
+            expires_in: Some(120),
+            scope: None,
+            expires_at_unix: None,
+        };
+        stamp_expiry(&mut tokens);
+        let now = current_unix();
+        let stamped = tokens.expires_at_unix.expect("expiry");
+        assert!(stamped >= now + 110 && stamped <= now + 130);
     }
 }
