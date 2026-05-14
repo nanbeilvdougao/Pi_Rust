@@ -131,10 +131,9 @@ impl Tool for WebFetchTool {
             .unwrap_or("application/octet-stream")
             .to_string();
         let final_url = response.get_url().to_string();
-        let reader = response.into_reader().take(max_bytes + 1);
+        let mut reader = response.into_reader().take(max_bytes + 1);
         let mut bytes: Vec<u8> = Vec::new();
         reader
-            .take(max_bytes + 1)
             .read_to_end(&mut bytes)
             .map_err(|err| {
                 PiError::new(PiErrorKind::Io, format!("webfetch 读取失败：{err}"))

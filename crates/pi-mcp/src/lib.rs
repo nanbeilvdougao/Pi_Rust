@@ -335,6 +335,18 @@ impl McpServer {
         let mut guard = inner
             .lock()
             .map_err(|err| PiError::new(PiErrorKind::Tool, format!("MCP lock 失败：{err}")))?;
+        // Detect a dead child eagerly so the user sees `MCP server 已退出`
+        // instead of a generic write/flush error after the OS finally
+        // surfaces a BrokenPipe.
+        if let Ok(Some(status)) = guard.child.try_wait() {
+            return Err(PiError::new(
+                PiErrorKind::Tool,
+                format!(
+                    "MCP server 已退出（exit {}），无法执行 {method}",
+                    status.code().unwrap_or(-1)
+                ),
+            ));
+        }
         guard.next_id += 1;
         let id = guard.next_id;
         let request = Request {
@@ -346,10 +358,16 @@ impl McpServer {
         let mut line = serde_json::to_string(&request)?;
         line.push('\n');
         guard.stdin.write_all(line.as_bytes()).map_err(|err| {
-            PiError::new(PiErrorKind::Tool, format!("写入 MCP stdin 失败：{err}"))
+            PiError::new(
+                PiErrorKind::Tool,
+                format!("写入 MCP stdin 失败（server 可能已退出）：{err}"),
+            )
         })?;
         guard.stdin.flush().map_err(|err| {
-            PiError::new(PiErrorKind::Tool, format!("MCP stdin flush 失败：{err}"))
+            PiError::new(
+                PiErrorKind::Tool,
+                format!("MCP stdin flush 失败（server 可能已退出）：{err}"),
+            )
         })?;
         loop {
             if let Some(flag) = &cancelled {

@@ -28,10 +28,17 @@
 //!
 //! Parity target: `packages/agent/src/hooks.ts`.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use pi_core::{PiError, PiErrorKind, PiResult};
+
+/// Per-phase hook execution budget. A hung script counts as a non-zero exit
+/// so the existing `aborts()` semantics keep pre-* hooks fail-closed.
+const PRE_HOOK_TIMEOUT: Duration = Duration::from_secs(30);
+const POST_HOOK_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookPhase {
@@ -113,6 +120,22 @@ fn truncate_env(value: &str) -> String {
 /// Run the hook for `phase` if one is on disk. Returns `HookOutcome::ran=false`
 /// when no script exists, so callers can branch without parsing exit codes.
 pub fn run(workspace: &Path, phase: HookPhase, ctx: &HookContext) -> PiResult<HookOutcome> {
+    let timeout = match phase {
+        HookPhase::PreTurn | HookPhase::PreTool => PRE_HOOK_TIMEOUT,
+        HookPhase::PostTool | HookPhase::PostTurn => POST_HOOK_TIMEOUT,
+    };
+    run_with_timeout(workspace, phase, ctx, timeout)
+}
+
+/// Same as `run` but the caller supplies the timeout budget. Exposed crate-
+/// internally so unit tests can exercise the timeout branch without waiting
+/// the full 30/60 second default.
+pub(crate) fn run_with_timeout(
+    workspace: &Path,
+    phase: HookPhase,
+    ctx: &HookContext,
+    timeout: Duration,
+) -> PiResult<HookOutcome> {
     let Some(path) = resolve(workspace, phase) else {
         return Ok(HookOutcome {
             ran: false,
@@ -148,17 +171,57 @@ pub fn run(workspace: &Path, phase: HookPhase, ctx: &HookContext) -> PiResult<Ho
     if let Some(output) = &ctx.tool_output {
         command.env("PI_TOOL_OUTPUT", truncate_env(output));
     }
-    let output = command.output().map_err(|err| {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|err| {
         PiError::new(
             PiErrorKind::Io,
             format!("hook {} 启动失败：{err}", phase.slug()),
         )
     })?;
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait().map_err(|err| {
+            PiError::new(PiErrorKind::Io, format!("hook 等待失败：{err}"))
+        })? {
+            Some(status) => break Some(status),
+            None => {
+                if Instant::now() >= deadline {
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
+    let exit_code = match status {
+        Some(s) => s.code().unwrap_or(-1),
+        None => {
+            // Kill the runaway hook so it cannot continue holding resources
+            // after we move on. Treat the timeout as a non-zero exit so
+            // pre-* hooks fail-closed.
+            let _ = child.kill();
+            let _ = child.wait();
+            -1
+        }
+    };
+    let mut stdout = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_string(&mut stdout);
+    }
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    if status.is_none() {
+        stderr.push_str(&format!(
+            "\n[hook] 超时 {} 秒，已强制终止",
+            timeout.as_secs()
+        ));
+    }
     Ok(HookOutcome {
         ran: true,
-        exit_code: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code,
+        stdout,
+        stderr,
     })
 }
 
@@ -228,6 +291,40 @@ mod tests {
         .expect("run");
         assert!(outcome.stdout.contains("phase=pre-tool"), "got: {}", outcome.stdout);
         assert!(outcome.stdout.contains("tool=read"));
+    }
+
+    #[test]
+    fn hung_pre_tool_hook_times_out_and_aborts() {
+        // Drop the timeout to keep the test fast. We bypass the public
+        // constant by writing a sleep that vastly exceeds it; the timeout
+        // path triggers, the hook is treated as aborting.
+        let dir = tempfile::tempdir().unwrap();
+        // A pre-tool script that sleeps 120s. Our timeout is 30s, but for
+        // the test we exercise the cancel branch by directly invoking with
+        // a hook that exits 1 immediately when SIGTERM is received.
+        write_hook(
+            &dir,
+            HookPhase::PreTool,
+            "#!/bin/sh\nsleep 120\nexit 0\n",
+        );
+        // Use a custom internal helper to avoid waiting 30s in the test.
+        let start = std::time::Instant::now();
+        let outcome = run_with_timeout(
+            dir.path(),
+            HookPhase::PreTool,
+            &HookContext::default(),
+            std::time::Duration::from_millis(200),
+        )
+        .expect("run");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "timeout path took too long: {:?}",
+            elapsed
+        );
+        assert_eq!(outcome.exit_code, -1);
+        assert!(outcome.aborts(HookPhase::PreTool));
+        assert!(outcome.stderr.contains("超时"));
     }
 
     #[test]

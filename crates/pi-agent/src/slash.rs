@@ -74,6 +74,10 @@ impl SlashRegistry {
                     name: "/quit",
                     description: "退出 pi",
                 },
+                SlashCommand {
+                    name: "/init",
+                    description: "在当前目录初始化 .pi/ 骨架（skills/commands/agents/prompts/resources/hooks）",
+                },
             ],
         }
     }
@@ -174,12 +178,82 @@ impl SlashRegistry {
                     "用法：/permission <read-only|confirm|trusted|plan>；参数 {rest}",
                 )),
             }),
+            "/init" => {
+                let report = init_workspace_skeleton();
+                Some(SlashOutcome {
+                    events: Vec::new(),
+                    assistant: Some(report),
+                })
+            }
             other => Some(SlashOutcome {
                 events: Vec::new(),
                 assistant: Some(format!("未知命令：{other}。试试 /help。")),
             }),
         }
     }
+}
+
+/// Materialize the standard `.pi/` workspace skeleton in the current
+/// directory. Each subdirectory is created idempotently; if a file is
+/// missing we write a small placeholder so the user has something to edit.
+/// Returns a human-readable summary the slash command can echo back.
+fn init_workspace_skeleton() -> String {
+    let Ok(cwd) = std::env::current_dir() else {
+        return "无法读取当前目录，跳过 /init。".to_string();
+    };
+    let root = cwd.join(".pi");
+    let subdirs = [
+        "skills",
+        "commands",
+        "agents",
+        "prompts",
+        "resources",
+        "hooks",
+        "todos",
+    ];
+    let mut created: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for sub in subdirs {
+        let dir = root.join(sub);
+        if dir.exists() {
+            skipped.push(sub.to_string());
+        } else if fs::create_dir_all(&dir).is_ok() {
+            created.push(sub.to_string());
+        }
+    }
+    // .gitignore template — keeps sessions + todos out of version control by
+    // default. The user can edit it after.
+    let gitignore = root.join(".gitignore");
+    if !gitignore.exists() {
+        let _ = fs::write(
+            &gitignore,
+            "todos/\nsessions/\nauth.enc\n*.local\n",
+        );
+        created.push(".gitignore".to_string());
+    }
+    // Example system.md so users discover the workspace override.
+    let system_md = root.join("system.md");
+    if !system_md.exists() {
+        let _ = fs::write(
+            &system_md,
+            "# Workspace System Prompt\n\n\
+             pi 将这段内容作为系统提示词的开头（动态尾巴仍由 pi 自动注入）。\n\
+             删除或留空这个文件来恢复默认提示词。\n",
+        );
+        created.push("system.md".to_string());
+    }
+    let mut out = String::new();
+    out.push_str(&format!("✓ 工作区骨架已就绪：{}\n", root.display()));
+    if !created.is_empty() {
+        out.push_str(&format!("  新建：{}\n", created.join(", ")));
+    }
+    if !skipped.is_empty() {
+        out.push_str(&format!("  已存在：{}\n", skipped.join(", ")));
+    }
+    out.push_str(
+        "提示：现在可以把 markdown skill / 命令 / agent profile / prompt / 资源 / 钩子放到对应子目录里，pi 会在下一轮自动加载。",
+    );
+    out
 }
 
 #[cfg(test)]
@@ -207,4 +281,29 @@ mod tests {
         let registry = SlashRegistry::builtin();
         assert!(registry.handle("hello").is_none());
     }
+
+    #[test]
+    fn init_creates_pi_skeleton_in_cwd() {
+        // /init writes against the current working directory, so we have to
+        // chdir into a tempdir for the duration of the test. Serialize with
+        // a module-local mutex so parallel tests do not stomp each other.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = TEST_CWD.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(dir.path()).expect("cd");
+        let registry = SlashRegistry::builtin();
+        let outcome = registry.handle("/init").expect("outcome");
+        std::env::set_current_dir(prev).expect("restore cwd");
+        let text = outcome.assistant.expect("text");
+        assert!(text.contains("工作区骨架已就绪"));
+        for sub in ["skills", "commands", "agents", "prompts", "resources", "hooks"] {
+            let path = dir.path().join(".pi").join(sub);
+            assert!(path.is_dir(), "missing dir: {}", path.display());
+        }
+        assert!(dir.path().join(".pi").join("system.md").is_file());
+        assert!(dir.path().join(".pi").join(".gitignore").is_file());
+    }
+
+    use std::sync::Mutex;
+    static TEST_CWD: Mutex<()> = Mutex::new(());
 }
