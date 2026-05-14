@@ -9,7 +9,7 @@ rust-version.workspace = true
 
 [features]
 default = ["encrypted-file"]
-encrypted-file = ["dep:chacha20poly1305", "dep:sha2"]
+encrypted-file = ["dep:chacha20poly1305"]
 keyring = ["dep:keyring"]
 
 [dependencies]
@@ -17,8 +17,9 @@ pi-core = { path = "../pi-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+ureq = { workspace = true }
+sha2 = { workspace = true }
 chacha20poly1305 = { workspace = true, optional = true }
-sha2 = { workspace = true, optional = true }
 keyring = { workspace = true, optional = true }
 
 [dev-dependencies]

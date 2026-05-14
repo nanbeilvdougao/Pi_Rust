@@ -19,6 +19,7 @@ toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+pi-permissions = { path = "../pi-permissions" }
 
 [lints]
 workspace = true

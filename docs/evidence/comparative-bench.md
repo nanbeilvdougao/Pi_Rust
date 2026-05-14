@@ -1,4 +1,4 @@
-# Comparative Benchmark — Pi Rust vs pi_agent_rust
+# Comparative Benchmark — Pi Rust vs pi_agent_rust vs pi-rs
 
 Captured by running both projects on the same machine, same compiler family,
 same criterion settings (`--warm-up-time 1 --measurement-time 2 --sample-size 30`).
@@ -68,13 +68,44 @@ median wall-time per iteration on Apple Silicon, criterion `--warm-up-time 1
 | `tool_dispatch` | parse JSON → registry lookup → run `read` on a 3-line file | **9.6 µs** | includes the permission gate. `ls` on a small dir lands at 11.4 µs. |
 | `agent_loop` | full `run_single_turn` against a `FauxProvider` (load session, send user, stream "ok", persist) | **177 µs** | pi_agent_rust has no equivalent faux-harness benchmark; this is a standalone Pi Rust number for "how fast the agent loop is when the LLM is not the bottleneck." |
 
+## Cold-start wall-clock (three-way)
+
+A cheap apples-to-apples for "how fast does the user see anything from this
+binary on a cold cache." `--version` (or `--help` for pi-rs which has no
+`--version`) is the smallest user-visible work the CLI can do, so the
+delta is almost entirely binary load + arg parsing.
+
+Single run, release build, macOS aarch64:
+
+| Project | Command | Wall-time |
+| --- | --- | --- |
+| **Pi Rust**       | `pi --version`       | **0.44 s** |
+| pi-rs             | `pi-rs --help`       | 0.57 s |
+| pi_agent_rust     | `pi --version`       | 0.76 s |
+
+Raw `time -p` artifacts: `docs/evidence/comparative/{pi-rs,pi_agent_rust}-wallclock-*.txt`
+and `docs/evidence/comparative/pi-rust-*.txt`. Re-run with
+`bash scripts/run-comparative-benches.sh` from anywhere on the same machine.
+
 ## Methodology notes
 
-- pi_agent_rust's `benches/session_save.rs` currently emits 0 criterion
-  targets on our host (criterion 0.8 macro interaction). When that is fixed
-  upstream we will populate a third row group here for session append.
-- pi-rs ships no `benches/` directory; we leave its column out instead of
-  inventing a workload.
+- pi_agent_rust's `benches/session_save.rs` still emits 0 criterion targets
+  on our host (criterion 0.8 macro interaction in their bench file). We
+  substitute the wall-clock proxy above; once they fix the macro upstream
+  we will populate a fourth column with their `session_save` median.
+- pi-rs ships no `benches/` directory; the wall-clock proxy above is the
+  honest substitute. Don't read it as a head-to-head on hot code paths —
+  cold-start is a single observation per project per run.
 - We deliberately do not aggregate these numbers into a single
   marketing-style "X% faster overall" headline. Hot paths matter where they
   matter; the parity ledger references this file by section instead.
+
+## How to reproduce
+
+```bash
+bash scripts/run-comparative-benches.sh \
+  /path/to/pi_agent_rust /path/to/pi-rs docs/evidence/comparative
+```
+
+The script writes timestamped `.txt` files under `docs/evidence/comparative/`
+so we can diff successive runs.

@@ -14,6 +14,7 @@ clipboard = ["dep:arboard"]
 [dependencies]
 pi-core = { path = "../pi-core" }
 pi-agent = { path = "../pi-agent" }
+pi-auth = { path = "../pi-auth", default-features = false, features = ["encrypted-file"] }
 pi-session = { path = "../pi-session" }
 pi-tools = { path = "../pi-tools" }
 ratatui = { workspace = true }

@@ -31,7 +31,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 pub mod diff;
+pub mod image_gen;
+pub mod mutation_queue;
 pub mod truncate;
+
+use mutation_queue::with_path_lock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCall {
@@ -148,12 +152,14 @@ fn builtin_tools() -> Vec<Box<dyn Tool>> {
         Box::new(ReadTool),
         Box::new(WriteTool),
         Box::new(EditTool),
+        Box::new(MultiEditTool),
         Box::new(BashTool),
         Box::new(SearchTool),
         Box::new(GrepTool),
         Box::new(FindTool),
         Box::new(LsTool),
         Box::new(EpkgTool),
+        Box::new(image_gen::ImageGenerateTool),
     ]
 }
 
@@ -163,6 +169,8 @@ struct ReadTool;
 struct WriteTool;
 #[derive(Debug, Default, Clone, Copy)]
 struct EditTool;
+#[derive(Debug, Default, Clone, Copy)]
+struct MultiEditTool;
 #[derive(Debug, Default, Clone, Copy)]
 struct BashTool;
 #[derive(Debug, Default, Clone, Copy)]
@@ -312,7 +320,13 @@ impl Tool for WriteTool {
                 }
             }
         }
-        fs::write(&parsed.path, &parsed.content)?;
+        // Serialize against concurrent writers on the same path; the queue
+        // does not enforce a snapshot here because `write` is the
+        // "unconditional overwrite" semantics — but it still atomically
+        // renames a sibling tmp file in place.
+        with_path_lock(Path::new(&parsed.path), |guard| {
+            guard.commit(parsed.content.as_bytes())
+        })?;
         Ok(output_for(
             "write",
             format!("已写入 {}（{} 字节）", parsed.path, parsed.content.len()),
@@ -376,51 +390,196 @@ impl Tool for EditTool {
         };
 
         permissions.require(request(Capability::WriteFile, &parsed.path, "编辑文件"))?;
-        let current = fs::read_to_string(&parsed.path).map_err(|err| {
-            PiError::new(
-                if err.kind() == std::io::ErrorKind::NotFound {
-                    PiErrorKind::NotFound
-                } else {
-                    PiErrorKind::Io
-                },
-                format!("读取 {} 失败：{err}", parsed.path),
-            )
-        })?;
         if parsed.old == parsed.new {
             return Err(PiError::new(
                 PiErrorKind::InvalidInput,
                 "edit 工具 old 与 new 相同",
             ));
         }
+        let path_buf = std::path::PathBuf::from(&parsed.path);
+        let (edited_text, current_text) = with_path_lock(&path_buf, |guard| {
+            let snap = guard.snapshot()?.ok_or_else(|| {
+                PiError::new(
+                    PiErrorKind::NotFound,
+                    format!("文件不存在：{}", parsed.path),
+                )
+            })?;
+            let current = String::from_utf8(snap)
+                .map_err(|err| PiError::new(PiErrorKind::Io, format!("文件不是 UTF-8：{err}")))?;
+            let occurrences = current.matches(&parsed.old).count();
+            if occurrences == 0 {
+                return Err(PiError::new(PiErrorKind::Tool, "edit 未找到要替换的文本"));
+            }
+            let replace_all = parsed.replace_all.unwrap_or(false);
+            let expect_unique = parsed.expect_unique.unwrap_or(true);
+            if !replace_all && expect_unique && occurrences > 1 {
+                return Err(PiError::new(
+                    PiErrorKind::Tool,
+                    format!(
+                        "edit 找到 {occurrences} 次 old 匹配，请改用 replace_all 或加上更多上下文以确保唯一"
+                    ),
+                ));
+            }
+            let edited = if replace_all {
+                current.replace(&parsed.old, &parsed.new)
+            } else {
+                current.replacen(&parsed.old, &parsed.new, 1)
+            };
+            guard.commit(edited.as_bytes())?;
+            Ok((edited, current))
+        })?;
+        let edited = edited_text;
+        let current = current_text;
         let occurrences = current.matches(&parsed.old).count();
-        if occurrences == 0 {
-            return Err(PiError::new(PiErrorKind::Tool, "edit 未找到要替换的文本"));
-        }
         let replace_all = parsed.replace_all.unwrap_or(false);
-        let expect_unique = parsed.expect_unique.unwrap_or(true);
-        if !replace_all && expect_unique && occurrences > 1 {
-            return Err(PiError::new(
-                PiErrorKind::Tool,
-                format!(
-                    "edit 找到 {occurrences} 次 old 匹配，请改用 replace_all 或加上更多上下文以确保唯一"
-                ),
-            ));
-        }
-
-        let edited = if replace_all {
-            current.replace(&parsed.old, &parsed.new)
-        } else {
-            current.replacen(&parsed.old, &parsed.new, 1)
-        };
 
         let preview = diff::unified(&current, &edited, &parsed.path);
-        fs::write(&parsed.path, &edited)?;
         Ok(output_for(
             "edit",
             format!(
                 "已编辑 {} (replaced {} 处)\n{preview}",
                 parsed.path,
                 if replace_all { occurrences } else { 1 }
+            ),
+        ))
+    }
+}
+
+// ===== MultiEdit ============================================================
+//
+// Atomic multi-replace inside one file. All `edits` are pre-checked against
+// the current contents; any unique-violation or missing match aborts the
+// whole turn before a single byte hits disk. Edits apply in declared order
+// against the *running* buffer, mirroring TS pi's `multi-edit` semantics.
+
+#[derive(Debug, Deserialize, Default)]
+struct MultiEditInput {
+    path: String,
+    edits: Vec<MultiEditOp>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct MultiEditOp {
+    old: String,
+    new: String,
+    #[serde(default)]
+    expect_unique: Option<bool>,
+    #[serde(default)]
+    replace_all: Option<bool>,
+}
+
+impl Tool for MultiEditTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "multi_edit".to_string(),
+            description: "原子多处替换：所有匹配预检通过才写盘，任一失败整体回滚".to_string(),
+            input_shape: "json".to_string(),
+            parameters: Some(json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old": {"type": "string"},
+                                "new": {"type": "string"},
+                                "expect_unique": {"type": "boolean", "default": true},
+                                "replace_all": {"type": "boolean", "default": false}
+                            },
+                            "required": ["old", "new"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["path", "edits"],
+                "additionalProperties": false
+            })),
+            mutates: true,
+        }
+    }
+
+    fn run(&self, input: &ToolInput, permissions: &mut PermissionEngine) -> PiResult<ToolOutput> {
+        let parsed: MultiEditInput = if input.value.is_object() {
+            serde_json::from_value(input.value.clone())?
+        } else {
+            return Err(PiError::new(
+                PiErrorKind::InvalidInput,
+                "multi_edit 需要结构化 JSON 输入 {path, edits: [...]}",
+            ));
+        };
+        if parsed.edits.is_empty() {
+            return Err(PiError::new(
+                PiErrorKind::InvalidInput,
+                "multi_edit edits 不能为空",
+            ));
+        }
+        permissions.require(request(Capability::WriteFile, &parsed.path, "原子多处编辑"))?;
+
+        let path_buf = std::path::PathBuf::from(&parsed.path);
+        let (working, original, total_replacements) = with_path_lock(&path_buf, |guard| {
+            let snap = guard.snapshot()?.ok_or_else(|| {
+                PiError::new(
+                    PiErrorKind::NotFound,
+                    format!("文件不存在：{}", parsed.path),
+                )
+            })?;
+            let original = String::from_utf8(snap)
+                .map_err(|err| PiError::new(PiErrorKind::Io, format!("文件不是 UTF-8：{err}")))?;
+            let mut working = original.clone();
+            let mut total_replacements = 0usize;
+            for (idx, edit) in parsed.edits.iter().enumerate() {
+                if edit.old == edit.new {
+                    return Err(PiError::new(
+                        PiErrorKind::InvalidInput,
+                        format!("multi_edit edit[{idx}] 的 old 与 new 相同"),
+                    ));
+                }
+                let occurrences = working.matches(&edit.old).count();
+                if occurrences == 0 {
+                    return Err(PiError::new(
+                        PiErrorKind::Tool,
+                        format!(
+                            "multi_edit edit[{idx}] 未找到要替换的文本，整体回滚（文件未改动）"
+                        ),
+                    ));
+                }
+                let replace_all = edit.replace_all.unwrap_or(false);
+                let expect_unique = edit.expect_unique.unwrap_or(true);
+                if !replace_all && expect_unique && occurrences > 1 {
+                    return Err(PiError::new(
+                        PiErrorKind::Tool,
+                        format!(
+                            "multi_edit edit[{idx}] 匹配 {occurrences} 次，请改用 replace_all 或增加上下文，整体回滚"
+                        ),
+                    ));
+                }
+                if replace_all {
+                    working = working.replace(&edit.old, &edit.new);
+                    total_replacements += occurrences;
+                } else {
+                    working = working.replacen(&edit.old, &edit.new, 1);
+                    total_replacements += 1;
+                }
+            }
+            if working == original {
+                return Err(PiError::new(
+                    PiErrorKind::Tool,
+                    "multi_edit 预检通过但没有实际改动",
+                ));
+            }
+            guard.commit(working.as_bytes())?;
+            Ok((working, original, total_replacements))
+        })?;
+
+        let preview = diff::unified(&original, &working, &parsed.path);
+        Ok(output_for(
+            "multi_edit",
+            format!(
+                "已原子应用 {} 处编辑到 {}\n{preview}",
+                total_replacements, parsed.path
             ),
         ))
     }
@@ -947,6 +1106,89 @@ mod tests {
             &mut perms,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn multi_edit_applies_all_when_every_match_exists() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("multi.txt");
+        fs::write(&file, "alpha\nbeta\ngamma\n").unwrap();
+        let runtime = runtime();
+        let mut perms = permissions();
+        let out = runtime
+            .run(
+                ToolCall {
+                    name: "multi_edit".to_string(),
+                    input: serde_json::to_string(&json!({
+                        "path": file,
+                        "edits": [
+                            {"old": "alpha", "new": "ALPHA"},
+                            {"old": "gamma", "new": "GAMMA"}
+                        ]
+                    }))
+                    .unwrap(),
+                },
+                &mut perms,
+            )
+            .unwrap();
+        assert!(out.output.contains("已原子应用 2 处编辑"));
+        let written = fs::read_to_string(&file).unwrap();
+        assert!(written.contains("ALPHA"));
+        assert!(written.contains("GAMMA"));
+        assert!(written.contains("beta"));
+    }
+
+    #[test]
+    fn multi_edit_rolls_back_when_any_match_missing() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("rollback.txt");
+        fs::write(&file, "alpha\nbeta\n").unwrap();
+        let original = fs::read_to_string(&file).unwrap();
+        let runtime = runtime();
+        let mut perms = permissions();
+        let result = runtime.run(
+            ToolCall {
+                name: "multi_edit".to_string(),
+                input: serde_json::to_string(&json!({
+                    "path": file,
+                    "edits": [
+                        {"old": "alpha", "new": "ALPHA"},
+                        {"old": "totally_not_present", "new": "X"}
+                    ]
+                }))
+                .unwrap(),
+            },
+            &mut perms,
+        );
+        assert!(result.is_err());
+        // Crucial: file is untouched.
+        assert_eq!(fs::read_to_string(&file).unwrap(), original);
+    }
+
+    #[test]
+    fn multi_edit_chains_sequential_substitutions() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("chain.txt");
+        fs::write(&file, "step-A").unwrap();
+        let runtime = runtime();
+        let mut perms = permissions();
+        runtime
+            .run(
+                ToolCall {
+                    name: "multi_edit".to_string(),
+                    input: serde_json::to_string(&json!({
+                        "path": file,
+                        "edits": [
+                            {"old": "step-A", "new": "step-B"},
+                            {"old": "step-B", "new": "step-C"}
+                        ]
+                    }))
+                    .unwrap(),
+                },
+                &mut perms,
+            )
+            .unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "step-C");
     }
 
     #[test]

@@ -1,0 +1,91 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            asset: pi-x86_64-macos
+            cross: false
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            asset: pi-aarch64-macos
+            cross: false
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            asset: pi-x86_64-linux
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            asset: pi-aarch64-linux
+            cross: true
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            asset: pi-x86_64-windows
+            cross: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: install toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: install cross compiler (linux aarch64)
+        if: ${{ matrix.cross }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat >>.cargo/config.toml <<EOF
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+      - name: build release
+        run: cargo build --release --target ${{ matrix.target }} -p pi-cli
+      - name: stage asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          BIN=target/${{ matrix.target }}/release/pi
+          if [ "${{ runner.os }}" = "Windows" ]; then BIN="$BIN.exe"; fi
+          cp "$BIN" "dist/${{ matrix.asset }}"
+          shasum -a 256 "dist/${{ matrix.asset }}" > "dist/${{ matrix.asset }}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}*
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: flatten artifacts
+        run: |
+          mkdir -p release
+          find dist -type f \( -name 'pi-*' \) -exec cp {} release/ \;
+          ls -lah release
+      - name: publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

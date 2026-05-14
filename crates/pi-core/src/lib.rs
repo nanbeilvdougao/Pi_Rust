@@ -4,7 +4,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 pub mod error_hints;
+pub mod telemetry;
+pub mod timings;
 pub use error_hints::{hint_for, ErrorHint};
+pub use telemetry::{flush as flush_telemetry, record as record_telemetry, TelemetryEvent};
 
 pub type PiResult<T> = Result<T, PiError>;
 

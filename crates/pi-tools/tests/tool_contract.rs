@@ -10,7 +10,18 @@ fn builtin_tool_schemas_are_stable() {
         .map(|schema| schema.name)
         .collect::<Vec<_>>();
 
-    for required in ["bash", "edit", "epkg", "ls", "read", "search", "write"] {
+    for required in [
+        "bash",
+        "edit",
+        "multi_edit",
+        "epkg",
+        "find",
+        "grep",
+        "ls",
+        "read",
+        "search",
+        "write",
+    ] {
         assert!(names.contains(&required.to_string()), "missing {required}");
     }
 }

@@ -1,0 +1,211 @@
+    Finished `bench` profile [optimized] target(s) in 0.74s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running benches/tools.rs (target/release/deps/tools-4b2c3e566922aae4)
+[bench-env] os=macOS 26.4.1 arch=aarch64 cpu="Apple M4 Max" cores=16 mem_mb=49152 governor=unavailable turbo=unavailable aslr=unavailable thp=unavailable noise_score=0 config_hash=3472e5908cee7f48a9e5fe00f6fd3dc5342f316ff9afd1064e3e90f2433bd29a
+Gnuplot not found, using plotters backend
+Benchmarking truncation/head/1000
+Benchmarking truncation/head/1000: Warming up for 3.0000 s
+Benchmarking truncation/head/1000: Collecting 100 samples in estimated 5.0154 s (1.5M iterations)
+Benchmarking truncation/head/1000: Analyzing
+truncation/head/1000    time:   [3.2882 µs 3.3375 µs 3.4315 µs]
+                        thrpt:  [21.983 GiB/s 22.603 GiB/s 22.942 GiB/s]
+                 change:
+                        time:   [+1.6233% +2.9949% +5.5547%] (p = 0.00 < 0.05)
+                        thrpt:  [−5.2624% −2.9078% −1.5973%]
+                        Performance has regressed.
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+Benchmarking truncation/head/10000
+Benchmarking truncation/head/10000: Warming up for 3.0000 s
+Benchmarking truncation/head/10000: Collecting 100 samples in estimated 5.1941 s (116k iterations)
+Benchmarking truncation/head/10000: Analyzing
+truncation/head/10000   time:   [44.575 µs 44.866 µs 45.225 µs]
+                        thrpt:  [16.681 GiB/s 16.814 GiB/s 16.924 GiB/s]
+                 change:
+                        time:   [+0.1630% +1.1171% +2.4359%] (p = 0.04 < 0.05)
+                        thrpt:  [−2.3780% −1.1047% −0.1628%]
+                        Change within noise threshold.
+Found 11 outliers among 100 measurements (11.00%)
+  1 (1.00%) low mild
+  6 (6.00%) high mild
+  4 (4.00%) high severe
+Benchmarking truncation/head/100000
+Benchmarking truncation/head/100000: Warming up for 3.0000 s
+Benchmarking truncation/head/100000: Collecting 100 samples in estimated 6.1568 s (20k iterations)
+Benchmarking truncation/head/100000: Analyzing
+truncation/head/100000  time:   [303.83 µs 304.39 µs 305.02 µs]
+                        thrpt:  [24.732 GiB/s 24.783 GiB/s 24.829 GiB/s]
+                 change:
+                        time:   [−2.4129% −2.1398% −1.8991%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.9359% +2.1866% +2.4726%]
+                        Performance has improved.
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+
+Benchmarking truncation/tail/1000
+Benchmarking truncation/tail/1000: Warming up for 3.0000 s
+Benchmarking truncation/tail/1000: Collecting 100 samples in estimated 5.0128 s (1.6M iterations)
+Benchmarking truncation/tail/1000: Analyzing
+truncation/tail/1000    time:   [3.2204 µs 3.2381 µs 3.2598 µs]
+                        thrpt:  [23.141 GiB/s 23.297 GiB/s 23.425 GiB/s]
+                 change:
+                        time:   [+1.7151% +2.0813% +2.4795%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.4195% −2.0389% −1.6861%]
+                        Performance has regressed.
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking truncation/tail/10000
+Benchmarking truncation/tail/10000: Warming up for 3.0000 s
+Benchmarking truncation/tail/10000: Collecting 100 samples in estimated 5.1553 s (111k iterations)
+Benchmarking truncation/tail/10000: Analyzing
+truncation/tail/10000   time:   [46.106 µs 46.193 µs 46.287 µs]
+                        thrpt:  [16.298 GiB/s 16.331 GiB/s 16.362 GiB/s]
+                 change:
+                        time:   [−2.0982% −1.8819% −1.6706%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.6989% +1.9180% +2.1431%]
+                        Performance has improved.
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+Benchmarking truncation/tail/100000
+Benchmarking truncation/tail/100000: Warming up for 3.0000 s
+Benchmarking truncation/tail/100000: Collecting 100 samples in estimated 6.2559 s (20k iterations)
+Benchmarking truncation/tail/100000: Analyzing
+truncation/tail/100000  time:   [308.20 µs 308.81 µs 309.55 µs]
+                        thrpt:  [24.370 GiB/s 24.428 GiB/s 24.477 GiB/s]
+                 change:
+                        time:   [−1.7852% −1.4767% −1.1748%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.1888% +1.4988% +1.8176%]
+                        Performance has improved.
+Found 10 outliers among 100 measurements (10.00%)
+  5 (5.00%) high mild
+  5 (5.00%) high severe
+
+Benchmarking truncation/head_no_trunc_500
+Benchmarking truncation/head_no_trunc_500: Warming up for 3.0000 s
+Benchmarking truncation/head_no_trunc_500: Collecting 100 samples in estimated 5.0055 s (3.5M iterations)
+Benchmarking truncation/head_no_trunc_500: Analyzing
+truncation/head_no_trunc_500
+                        time:   [1.4496 µs 1.4563 µs 1.4649 µs]
+                        thrpt:  [25.747 GiB/s 25.899 GiB/s 26.020 GiB/s]
+                 change:
+                        time:   [−0.1572% +0.2138% +0.6035%] (p = 0.30 > 0.05)
+                        thrpt:  [−0.5999% −0.2133% +0.1574%]
+                        No change in performance detected.
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking truncation/tail_no_trunc_500
+Benchmarking truncation/tail_no_trunc_500: Warming up for 3.0000 s
+Benchmarking truncation/tail_no_trunc_500: Collecting 100 samples in estimated 5.0036 s (3.5M iterations)
+Benchmarking truncation/tail_no_trunc_500: Analyzing
+truncation/tail_no_trunc_500
+                        time:   [1.4476 µs 1.4572 µs 1.4686 µs]
+                        thrpt:  [25.683 GiB/s 25.883 GiB/s 26.056 GiB/s]
+                 change:
+                        time:   [−0.7059% −0.1746% +0.4379%] (p = 0.56 > 0.05)
+                        thrpt:  [−0.4360% +0.1749% +0.7109%]
+                        No change in performance detected.
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+
+Benchmarking sse_parsing/parse/10
+Benchmarking sse_parsing/parse/10: Warming up for 3.0000 s
+Benchmarking sse_parsing/parse/10: Collecting 100 samples in estimated 5.0051 s (2.8M iterations)
+Benchmarking sse_parsing/parse/10: Analyzing
+sse_parsing/parse/10    time:   [1.7468 µs 1.7589 µs 1.7715 µs]
+                        thrpt:  [5.6451 Melem/s 5.6854 Melem/s 5.7249 Melem/s]
+                 change:
+                        time:   [+1.7880% +2.4236% +3.0734%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.9817% −2.3663% −1.7566%]
+                        Performance has regressed.
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+Benchmarking sse_parsing/parse/100
+Benchmarking sse_parsing/parse/100: Warming up for 3.0000 s
+Benchmarking sse_parsing/parse/100: Collecting 100 samples in estimated 5.0346 s (318k iterations)
+Benchmarking sse_parsing/parse/100: Analyzing
+sse_parsing/parse/100   time:   [15.853 µs 16.076 µs 16.417 µs]
+                        thrpt:  [6.0911 Melem/s 6.2206 Melem/s 6.3081 Melem/s]
+                 change:
+                        time:   [+1.6629% +2.6956% +3.9932%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.8399% −2.6249% −1.6357%]
+                        Performance has regressed.
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking sse_parsing/parse/1000
+Benchmarking sse_parsing/parse/1000: Warming up for 3.0000 s
+Benchmarking sse_parsing/parse/1000: Collecting 100 samples in estimated 5.5728 s (35k iterations)
+Benchmarking sse_parsing/parse/1000: Analyzing
+sse_parsing/parse/1000  time:   [156.42 µs 157.42 µs 158.39 µs]
+                        thrpt:  [6.3137 Melem/s 6.3525 Melem/s 6.3931 Melem/s]
+                 change:
+                        time:   [+2.3497% +2.9824% +3.6626%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.5332% −2.8961% −2.2958%]
+                        Performance has regressed.
+
+Benchmarking sse_stream/parse/64
+Benchmarking sse_stream/parse/64: Warming up for 3.0000 s
+Benchmarking sse_stream/parse/64: Collecting 20 samples in estimated 5.0117 s (13k iterations)
+Benchmarking sse_stream/parse/64: Analyzing
+sse_stream/parse/64     time:   [367.97 µs 371.13 µs 373.86 µs]
+                        thrpt:  [2.6748 Melem/s 2.6945 Melem/s 2.7176 Melem/s]
+                 change:
+                        time:   [+2.4236% +3.4271% +4.7025%] (p = 0.00 < 0.05)
+                        thrpt:  [−4.4913% −3.3135% −2.3663%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking sse_stream/parse/1024
+Benchmarking sse_stream/parse/1024: Warming up for 3.0000 s
+Benchmarking sse_stream/parse/1024: Collecting 20 samples in estimated 5.0182 s (28k iterations)
+Benchmarking sse_stream/parse/1024: Analyzing
+sse_stream/parse/1024   time:   [174.96 µs 176.68 µs 178.66 µs]
+                        thrpt:  [5.5972 Melem/s 5.6599 Melem/s 5.7157 Melem/s]
+                 change:
+                        time:   [+2.4586% +3.5493% +4.6447%] (p = 0.00 < 0.05)
+                        thrpt:  [−4.4386% −3.4276% −2.3996%]
+                        Performance has regressed.
+Benchmarking sse_stream/parse/4096
+Benchmarking sse_stream/parse/4096: Warming up for 3.0000 s
+Benchmarking sse_stream/parse/4096: Collecting 20 samples in estimated 5.0105 s (31k iterations)
+Benchmarking sse_stream/parse/4096: Analyzing
+sse_stream/parse/4096   time:   [161.91 µs 162.83 µs 163.88 µs]
+                        thrpt:  [6.1020 Melem/s 6.1414 Melem/s 6.1762 Melem/s]
+                 change:
+                        time:   [+0.1233% +0.9494% +1.7855%] (p = 0.03 < 0.05)
+                        thrpt:  [−1.7541% −0.9404% −0.1232%]
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking streaming_clone/arc_make_mut_clone_500tok
+Benchmarking streaming_clone/arc_make_mut_clone_500tok: Warming up for 500.00 ms
+Benchmarking streaming_clone/arc_make_mut_clone_500tok: Collecting 100 samples in estimated 3.0155 s (646k iterations)
+Benchmarking streaming_clone/arc_make_mut_clone_500tok: Analyzing
+streaming_clone/arc_make_mut_clone_500tok
+                        time:   [4.7137 µs 4.7436 µs 4.7747 µs]
+                        change: [+0.1188% +0.7178% +1.3457%] (p = 0.02 < 0.05)
+                        Change within noise threshold.
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+Benchmarking streaming_clone/deep_clone_500tok
+Benchmarking streaming_clone/deep_clone_500tok: Warming up for 500.00 ms
+Benchmarking streaming_clone/deep_clone_500tok: Collecting 100 samples in estimated 3.4239 s (25k iterations)
+Benchmarking streaming_clone/deep_clone_500tok: Analyzing
+streaming_clone/deep_clone_500tok
+                        time:   [136.73 µs 137.97 µs 139.40 µs]
+                        change: [+1.7595% +2.7329% +3.8891%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 10 outliers among 100 measurements (10.00%)
+  9 (9.00%) high mild
+  1 (1.00%) high severe
+

@@ -23,10 +23,12 @@ use serde::{Deserialize, Serialize};
 pub mod process;
 #[cfg(feature = "wasm")]
 pub mod wasm;
+pub mod wrapper;
 
 pub use process::{ExtensionHost, ExtensionInstance, HostcallReply};
 #[cfg(feature = "wasm")]
 pub use wasm::WasmExtensionHost;
+pub use wrapper::ToolBridge;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AbiVersion {

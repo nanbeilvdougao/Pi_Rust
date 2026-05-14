@@ -31,7 +31,10 @@ use serde::{Deserialize, Serialize};
 pub mod encrypted_file;
 #[cfg(feature = "keyring")]
 pub mod keyring_store;
+pub mod oauth;
 pub mod resolver;
+
+pub use oauth::{OAuthConfig, OAuthTokens};
 
 pub use resolver::{layered_resolver, EnvResolver, LayeredResolver, Resolver};
 

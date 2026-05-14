@@ -1,0 +1,11 @@
+55 |     pub fn with_sandbox_type(self, sandbox_type: String) -> Self {
+   |            ^^^^^^^^^^^^^^^^^
+
+warning: `pi-rs` (bin "pi") generated 93 warnings (12 duplicates)
+    Finished `release` profile [optimized] target(s) in 34.53s
+real 0.00
+user 0.00
+sys 0.00
+real 0.57
+user 0.00
+sys 0.00

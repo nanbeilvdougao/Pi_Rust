@@ -9,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use pi_core::{AppConfig, Locale, ToolSchema};
 
+use crate::source_info;
+
 pub fn default(config: &AppConfig, tools: &[ToolSchema]) -> String {
     let mut out = String::new();
     let zh = matches!(config.locale, Locale::ZhCn);
@@ -45,6 +47,12 @@ pub fn default(config: &AppConfig, tools: &[ToolSchema]) -> String {
     out.push_str(&format!("- date_utc: {}\n", iso_date_utc()));
     out.push_str(&format!("- provider: {}\n", config.model.provider));
     out.push_str(&format!("- model: {}\n", config.model.model));
+
+    // Source-control + project-manager context (TS pi parity: source-info.ts).
+    if let Ok(cwd) = env::current_dir() {
+        let info = source_info::detect(&cwd);
+        out.push_str(&source_info::render_prompt_section(&info, zh));
+    }
 
     if !tools.is_empty() {
         out.push('\n');

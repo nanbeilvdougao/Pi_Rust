@@ -48,12 +48,19 @@ use ratatui::{
 
 pub mod clipboard;
 pub mod completion;
+pub mod config_selector;
+pub mod footer;
 pub mod keybindings;
+pub mod session_picker;
 pub mod theme;
 use clipboard::{read_clipboard, Pasted};
 use completion::{Completer, CompletionItem, CompletionKind, TriggerSpan};
+pub use config_selector::{
+    needs_wizard as needs_config_wizard, run as run_config_wizard, ProviderChoice, WizardResult,
+};
 use keybindings::KeyBindings;
 use pi_core::Attachment;
+pub use session_picker::{pick as pick_session, PickResult};
 use theme::Theme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +187,7 @@ struct AppState {
     completion_idx: usize,
     completion_span: Option<TriggerSpan>,
     pending_attachments: Vec<Attachment>,
+    last_error: Option<String>,
 }
 
 impl AppState {
@@ -199,6 +207,7 @@ impl AppState {
             completion_idx: 0,
             completion_span: None,
             pending_attachments: Vec::new(),
+            last_error: None,
         }
     }
 
@@ -268,6 +277,7 @@ where
                         break;
                     }
                     Ok(TurnUpdate::Failed { error }) => {
+                        state.last_error = Some(error.clone());
                         state.push_entry(TranscriptKind::Error, error);
                         state.status = "请求失败。".to_string();
                         state.streaming_buffer.clear();
@@ -540,7 +550,7 @@ fn draw<S>(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(8),
-            Constraint::Length(3),
+            Constraint::Length(7),
             Constraint::Length(4),
             Constraint::Length(1),
         ])
@@ -558,16 +568,50 @@ fn draw<S>(
     frame.render_widget(transcript, chunks[0]);
 
     let config = agent.config();
-    let status_text = format!(
-        " {} | provider={} model={} | tokens累计: in={} out={} total={} ",
-        state.status,
-        config.model.provider,
-        config.model.model,
-        state.usage_total.prompt_tokens,
-        state.usage_total.completion_tokens,
-        state.usage_total.total_tokens,
+    let source = std::env::current_dir()
+        .map(|cwd| pi_agent::source_info::detect(&cwd))
+        .unwrap_or_default();
+    let footer = footer::build(
+        &state.status,
+        &config.model.provider,
+        &config.model.model,
+        &state.usage_total,
+        config.context_window_tokens,
+        &source,
+        state.last_error.as_deref(),
     );
-    let status = Paragraph::new(status_text).block(
+    let mut status_lines: Vec<Line<'static>> = Vec::new();
+    status_lines.push(Line::from(vec![Span::styled(
+        footer.status_line.clone(),
+        Style::default()
+            .fg(theme.status)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    status_lines.push(Line::from(footer.provider_line.clone()));
+    if let Some(git_line) = &footer.git_line {
+        status_lines.push(Line::from(Span::styled(
+            git_line.clone(),
+            Style::default().fg(theme.accent),
+        )));
+    }
+    status_lines.push(Line::from(vec![
+        Span::raw("tokens "),
+        Span::styled(
+            footer.token_bar.bar_text.clone(),
+            Style::default().fg(theme.accent),
+        ),
+        Span::raw(format!(
+            " {}/{}",
+            footer.token_bar.used, footer.token_bar.window
+        )),
+    ]));
+    if let Some(last_err) = &footer.last_error {
+        status_lines.push(Line::from(Span::styled(
+            format!("最近错误：{last_err}"),
+            Style::default().fg(theme.error),
+        )));
+    }
+    let status = Paragraph::new(status_lines).block(
         Block::default()
             .borders(Borders::ALL)
             .title(" 状态 ")

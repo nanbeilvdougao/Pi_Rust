@@ -1909,6 +1909,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "toml",
+ "ureq",
 ]
 
 [[package]]
@@ -1952,6 +1953,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -1961,6 +1963,7 @@ dependencies = [
  "async-trait",
  "pi-core",
  "pi-permissions",
+ "pi-tools",
  "serde",
  "serde_json",
  "tempfile",
@@ -1998,6 +2001,7 @@ dependencies = [
  "pi-core",
  "serde",
  "serde_json",
+ "sha2",
  "ureq",
 ]
 
@@ -2017,6 +2021,7 @@ name = "pi-tools"
 version = "0.1.0"
 dependencies = [
  "globset",
+ "pi-auth",
  "pi-core",
  "pi-permissions",
  "regex",
@@ -2024,6 +2029,7 @@ dependencies = [
  "serde_json",
  "similar",
  "tempfile",
+ "ureq",
  "walkdir",
 ]
 
@@ -2034,6 +2040,7 @@ dependencies = [
  "arboard",
  "crossterm",
  "pi-agent",
+ "pi-auth",
  "pi-core",
  "pi-session",
  "pi-tools",

@@ -37,11 +37,13 @@ pub mod compaction;
 pub mod settings;
 pub mod skills;
 pub mod slash;
+pub mod source_info;
 pub mod system_prompt;
 pub use compaction::{maybe_compact, CompactionReport};
 pub use settings::PersistedSettings;
 pub use skills::{Skill, SkillSet, SkillTrigger};
 pub use slash::{SlashCommand, SlashOutcome, SlashRegistry};
+pub use source_info::{detect as detect_source_info, SourceInfo};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentTurn {
@@ -209,6 +211,7 @@ impl<S: SessionStore> AgentRuntime<S> {
                 return Err(PiError::new(PiErrorKind::Cancelled, "用户取消"));
             }
 
+            let _compact_span = pi_core::timings::span_in("agent.compaction", "agent");
             if let Some(report) = maybe_compact(
                 &mut session.messages,
                 &*provider,
@@ -245,7 +248,9 @@ impl<S: SessionStore> AgentRuntime<S> {
                 events: &mut events,
                 cancel: self.cancel.clone(),
             };
+            let _stream_span = pi_core::timings::span_in("provider.stream", "provider");
             let response = provider.stream(request, &mut sink)?;
+            drop(_stream_span);
             total_usage.merge(&response.usage);
             if response.usage.total_tokens > 0 {
                 events.push(Event::Usage(response.usage.clone()));
@@ -290,6 +295,7 @@ impl<S: SessionStore> AgentRuntime<S> {
                     name: call.name.clone(),
                     input: call.input.clone(),
                 });
+                let _tool_span = pi_core::timings::span_in(&format!("tool.{}", call.name), "tool");
                 let output = match self.tools.run(call.clone(), &mut self.permissions) {
                     Ok(output) => output,
                     Err(err) => {

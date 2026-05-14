@@ -1,0 +1,53 @@
+agent_loop_pi_rust/faux_round_trip
+                        time:   [10.610 ms 10.866 ms 11.227 ms]
+                        change: [+6011.6% +6203.3% +6411.6%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+truncate_pi_rust/head_1000
+                        time:   [4.4636 µs 4.4892 µs 4.5169 µs]
+                        change: [+0.7026% +1.5749% +2.4230%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+truncate_pi_rust/head_10000
+                        time:   [20.700 µs 20.842 µs 20.963 µs]
+                        change: [-0.7565% +0.1227% +0.9804%] (p = 0.78 > 0.05)
+                        No change in performance detected.
+truncate_pi_rust/head_100000
+                        time:   [84.553 µs 84.969 µs 85.377 µs]
+                        change: [+0.2913% +1.2402% +2.1755%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+
+sse_parse_pi_rust/parse_10
+                        time:   [342.25 ns 344.32 ns 346.42 ns]
+                        change: [-2.8081% -1.5504% -0.4218%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+sse_parse_pi_rust/parse_100
+                        time:   [3.0791 µs 3.1051 µs 3.1275 µs]
+                        change: [-0.1565% +0.8817% +1.8792%] (p = 0.09 > 0.05)
+                        No change in performance detected.
+sse_parse_pi_rust/parse_1000
+                        time:   [30.578 µs 30.688 µs 30.807 µs]
+                        change: [+0.8863% +1.9325% +2.9381%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+
+session_save_pi_rust/append_100_messages
+                        time:   [2.3401 ms 2.3845 ms 2.4438 ms]
+                        change: [+8.4750% +10.801% +13.192%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high severe
+session_save_pi_rust/append_1000_messages
+                        time:   [22.319 ms 23.085 ms 23.821 ms]
+                        change: [-2.2748% +1.0953% +4.4915%] (p = 0.53 > 0.05)
+                        No change in performance detected.
+
+tool_dispatch_pi_rust/read_one_file
+                        time:   [9.9467 µs 10.061 µs 10.175 µs]
+                        change: [+2.9342% +4.6696% +6.2424%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+tool_dispatch_pi_rust/ls_small_dir
+                        time:   [12.606 µs 12.859 µs 13.157 µs]
+                        change: [+9.8311% +11.525% +13.250%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+

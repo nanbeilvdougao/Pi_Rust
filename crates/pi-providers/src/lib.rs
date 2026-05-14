@@ -27,13 +27,16 @@ use serde_json::{json, Value};
 
 pub mod aliases;
 pub mod anthropic;
+pub mod bedrock;
 pub mod faux;
 pub mod gemini;
 pub mod ollama;
 pub mod openai;
 pub mod probe;
+pub mod sigv4;
 
 pub use aliases::{resolve_alias, ResolvedSelection};
+pub use bedrock::BedrockProvider;
 pub use faux::{FauxProvider, FauxTurn};
 pub use probe::{probe_all, ProbeOutcome, ProbeReport};
 
@@ -238,6 +241,7 @@ impl ProviderRegistry {
         registry.register(openai::minimax_info());
         registry.register(openai::openai_info());
         registry.register(anthropic::anthropic_info());
+        registry.register(bedrock::bedrock_info());
         registry.register(gemini::gemini_info());
         registry
     }
@@ -318,6 +322,7 @@ pub fn provider_for(selection: &ModelSelection) -> PiResult<Box<dyn Provider>> {
         "minimax" => Ok(Box::new(OpenAiCompatibleProvider::minimax())),
         "openai" => Ok(Box::new(OpenAiProvider::new())),
         "anthropic" => Ok(Box::new(AnthropicProvider::new())),
+        "bedrock" => Ok(Box::new(BedrockProvider::new())),
         "gemini" => Ok(Box::new(GeminiProvider::new())),
         other => Err(PiError::new(
             PiErrorKind::Provider,
@@ -714,6 +719,7 @@ mod tests {
             "minimax",
             "openai",
             "anthropic",
+            "bedrock",
             "gemini",
         ] {
             assert!(registry.get(required).is_some(), "missing: {required}");

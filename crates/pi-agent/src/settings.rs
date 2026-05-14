@@ -48,10 +48,20 @@ impl PersistedSettings {
             if let Some(loaded) = read_settings(&home) {
                 merged = merge(merged, loaded);
             }
+            // Also try ~/.pi-rust/config.json for TS-pi-style users.
+            let home_json = home.with_extension("json");
+            if let Some(loaded) = read_json_settings(&home_json) {
+                merged = merge(merged, loaded);
+            }
         }
         if let Some(root) = workspace_root {
-            let workspace = root.join(".pi").join("config.toml");
-            if let Some(loaded) = read_settings(&workspace) {
+            let workspace_toml = root.join(".pi").join("config.toml");
+            if let Some(loaded) = read_settings(&workspace_toml) {
+                merged = merge(merged, loaded);
+            }
+            // TS pi writes `.pi/config.json`; accept it transparently.
+            let workspace_json = root.join(".pi").join("config.json");
+            if let Some(loaded) = read_json_settings(&workspace_json) {
                 merged = merge(merged, loaded);
             }
         }
@@ -141,6 +151,11 @@ fn user_settings_path() -> Option<PathBuf> {
 fn read_settings(path: &Path) -> Option<PersistedSettings> {
     let text = fs::read_to_string(path).ok()?;
     toml::from_str(&text).ok()
+}
+
+fn read_json_settings(path: &Path) -> Option<PersistedSettings> {
+    let text = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 /// Save user-level settings. The TOML format keeps things human-editable.

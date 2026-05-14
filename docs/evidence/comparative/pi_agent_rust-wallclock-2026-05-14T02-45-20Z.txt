@@ -1,0 +1,8 @@
+   Compiling sqlmodel-sqlite v0.2.2
+   Compiling pi_agent_rust v0.1.15 (/Users/shellmiao/Documents/Dev/Yui/Dev_Pi_Rust/pi_agent_rust)
+    Finished `release` profile [optimized] target(s) in 1m 56s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+real 0.76
+user 0.00
+sys 0.00

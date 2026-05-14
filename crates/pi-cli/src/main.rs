@@ -53,6 +53,10 @@ struct Cli {
     #[arg(long = "resume", value_name = "ID")]
     resume: Option<String>,
 
+    /// Pick a session interactively (ratatui list). Alias used by bare `pi sessions`.
+    #[arg(long = "pick", action = clap::ArgAction::SetTrue)]
+    pick: bool,
+
     /// Use the named session id for this turn.
     #[arg(long = "session", value_name = "ID")]
     session: Option<String>,
@@ -101,6 +105,10 @@ struct Cli {
     /// TUI theme: dark (default) / light / solarized, or path-based override.
     #[arg(long = "theme")]
     theme: Option<String>,
+
+    /// Emit a chrome://tracing JSON to this path covering this invocation.
+    #[arg(long = "trace", value_name = "PATH")]
+    trace: Option<std::path::PathBuf>,
 
     /// Run a JSON-RPC over stdio loop (for SDK/IDE integrations).
     #[arg(long = "rpc")]
@@ -188,6 +196,7 @@ impl From<LocaleArg> for Locale {
 }
 
 fn main() {
+    maybe_run_first_run_wizard();
     // Pre-clap subcommand routing: `pi auth …`, `pi doctor`, `pi sessions`.
     if let Some(auth_args) = auth_subcommand() {
         if let Err(err) = auth::run(&auth_args) {
@@ -217,6 +226,7 @@ fn main() {
             err.exit();
         }
     };
+    let start = std::time::Instant::now();
     if let Err(error) = run(args) {
         eprintln!("错误：{error}");
         let locale = match std::env::var("PI_LOCALE").as_deref() {
@@ -225,8 +235,18 @@ fn main() {
         };
         let hint = pi_core::hint_for(&error, locale);
         eprintln!("提示：{}", hint.format());
+        pi_core::record_telemetry(
+            "run",
+            Some(format!("{:?}", error.kind)),
+            Some(start.elapsed().as_millis() as u64),
+        );
+        pi_core::flush_telemetry();
+        pi_core::timings::finalize();
         std::process::exit(1);
     }
+    pi_core::record_telemetry("run", None, Some(start.elapsed().as_millis() as u64));
+    pi_core::flush_telemetry();
+    pi_core::timings::finalize();
 }
 
 fn legacy_subcommand_args() -> Option<Cli> {
@@ -236,8 +256,27 @@ fn legacy_subcommand_args() -> Option<Cli> {
     }
     match argv[1].as_str() {
         "doctor" if argv.len() == 2 => Cli::try_parse_from(["pi", "--doctor"]).ok(),
-        "sessions" if argv.len() == 2 => Cli::try_parse_from(["pi", "--list-sessions"]).ok(),
+        "sessions" if argv.len() == 2 => Cli::try_parse_from(["pi", "--pick"]).ok(),
         _ => None,
+    }
+}
+
+fn maybe_run_first_run_wizard() {
+    if !pi_tui::needs_config_wizard() {
+        return;
+    }
+    let providers: Vec<pi_tui::ProviderChoice> = ProviderRegistry::builtin()
+        .list()
+        .map(|p| pi_tui::ProviderChoice {
+            id: p.id.clone(),
+            display_name: p.display_name.clone(),
+            default_model: p.default_model.clone(),
+            supported_models: p.supported_models.clone(),
+            requires_api_key_env: p.requires_api_key_env.clone(),
+        })
+        .collect();
+    if let Err(err) = pi_tui::run_config_wizard(&providers) {
+        eprintln!("配置向导失败：{err}（继续以默认 echo provider 运行）");
     }
 }
 
@@ -255,6 +294,10 @@ fn parse_args() -> Result<Cli, clap::Error> {
 }
 
 fn run(cli: Cli) -> PiResult<()> {
+    if let Some(trace_path) = cli.trace.clone() {
+        pi_core::timings::enable(trace_path);
+    }
+    let _trace_finalize = pi_core::timings::span("pi.run");
     if cli.doctor {
         return print_doctor(cli.probe);
     }
@@ -289,6 +332,20 @@ fn run(cli: Cli) -> PiResult<()> {
 
     if cli.list_sessions {
         return print_sessions(&store);
+    }
+    let mut picked_session: Option<String> = None;
+    if cli.pick {
+        match pi_tui::pick_session(&store)
+            .map_err(|err| PiError::new(PiErrorKind::Io, err.to_string()))?
+        {
+            pi_tui::PickResult::Selected(id) => picked_session = Some(id),
+            pi_tui::PickResult::NewSession => picked_session = Some("default".to_string()),
+            pi_tui::PickResult::Cancelled => {
+                // Fall back to text listing so non-TTY invocations still
+                // see something useful.
+                return print_sessions(&store);
+            }
+        }
     }
     if let Some(id) = cli.delete_session {
         let deleted = store.delete(&id)?;
@@ -326,9 +383,8 @@ fn run(cli: Cli) -> PiResult<()> {
         return Ok(());
     }
 
-    let session_id = cli
-        .session
-        .clone()
+    let session_id = picked_session
+        .or_else(|| cli.session.clone())
         .or_else(|| cli.resume.clone())
         .or_else(|| {
             if cli.continue_default {

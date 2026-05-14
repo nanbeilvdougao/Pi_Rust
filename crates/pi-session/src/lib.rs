@@ -27,6 +27,7 @@ pub mod sqlite_index;
 pub use sqlite_index::SqliteIndex;
 
 pub mod export_html;
+pub mod interop;
 
 /// On-disk JSONL session schema version. Incremented when the header layout
 /// or message envelope changes; loaders tolerate older versions.
@@ -283,7 +284,9 @@ impl SessionStore for JsonlSessionStore {
             if line.trim().is_empty() {
                 continue;
             }
-            // First non-empty line: try parsing as a header.
+            // First non-empty line: try parsing as a header. Accept both our
+            // native shape and the TS-pi v3 header so a TS-written .jsonl
+            // loads without conversion.
             if line_idx == 0 || session.header.is_none() {
                 if let Ok(header) = serde_json::from_str::<SessionHeader>(&line) {
                     if header.kind == "session" {
@@ -291,11 +294,17 @@ impl SessionStore for JsonlSessionStore {
                         continue;
                     }
                 }
+                if let Some(header) = interop::parse_ts_header(&line) {
+                    session.header = Some(header);
+                    continue;
+                }
             }
             match serde_json::from_str::<Message>(&line) {
                 Ok(message) => session.push(message),
                 Err(_) => {
-                    if let Some(message) = legacy_parse_message(&line) {
+                    if let Some(message) = interop::parse_ts_entry(&line) {
+                        session.push(message);
+                    } else if let Some(message) = legacy_parse_message(&line) {
                         session.push(message);
                     }
                 }
@@ -467,5 +476,31 @@ mod tests {
         let summaries = store.list().expect("list");
         assert_eq!(summaries.len(), 2);
         assert_eq!(summaries[0].id, "second");
+    }
+
+    #[test]
+    fn loads_ts_pi_v3_session_jsonl() {
+        let dir = tempdir().expect("tempdir");
+        let store = JsonlSessionStore::new(dir.path());
+        let ts_file = dir.path().join("ts-session.jsonl");
+        std::fs::write(
+            &ts_file,
+            concat!(
+                "{\"type\":\"session\",\"version\":3,\"id\":\"ts\",\"timestamp\":\"2026-05-14T03:42:11.123Z\",\"cwd\":\"/tmp/ws\",\"parentSession\":null}\n",
+                "{\"type\":\"message\",\"id\":\"m1\",\"parentId\":null,\"timestamp\":\"2026-05-14T03:42:12Z\",\"message\":{\"role\":\"user\",\"content\":\"你好\"}}\n",
+                "{\"type\":\"compaction\",\"id\":\"c1\",\"parentId\":null,\"timestamp\":\"2026-05-14T03:42:13Z\",\"summary\":\"…\",\"firstKeptEntryId\":\"m1\",\"tokensBefore\":1234}\n",
+                "{\"type\":\"message\",\"id\":\"m2\",\"parentId\":null,\"timestamp\":\"2026-05-14T03:42:14Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"好的\"}]}}\n",
+            ),
+        )
+        .unwrap();
+        let session = store.load("ts-session").expect("load");
+        let header = session.header.as_ref().expect("header");
+        assert_eq!(header.version, 3);
+        assert_eq!(header.cwd.as_deref(), Some("/tmp/ws"));
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].role, Role::User);
+        assert_eq!(session.messages[0].content, "你好");
+        assert_eq!(session.messages[1].role, Role::Assistant);
+        assert_eq!(session.messages[1].content, "好的");
     }
 }
