@@ -15,25 +15,14 @@ pub fn default(config: &AppConfig, tools: &[ToolSchema]) -> String {
     let mut out = String::new();
     let zh = matches!(config.locale, Locale::ZhCn);
 
-    if zh {
-        out.push_str(
-            "你是 Pi，一个本地优先、面向中文用户的命令行 AI 编程助手。\n\n\
-            行为准则：\n\
-            - 默认简体中文回答，技术名词保留英文。\n\
-            - 输出务必简洁、可执行；除非用户要求，不写多余前言。\n\
-            - 修改文件、执行命令、访问网络前必须通过工具，并接受权限策略约束。\n\
-            - 遇到不确定的代码或 API，先用 read / search / grep 工具确认，再行动。\n\
-            - 使用提供的工具完成任务；只在确实没有合适工具时才给出文字回答。\n",
-        );
-    } else {
-        out.push_str(
-            "You are Pi, a local-first command-line AI coding assistant.\n\n\
-            Rules:\n\
-            - Be concise. Prefer actionable output over preamble.\n\
-            - All file mutations, command execution and network access go through tools.\n\
-            - Investigate with read/search/grep before making changes.\n\
-            - Prefer using provided tools instead of speculation.\n",
-        );
+    // Check for a workspace-local override at `.pi/system.md`. When present
+    // its body replaces the entire static template; the dynamic environment
+    // tail (cwd, os, locale, tools, source-info) is still appended so the
+    // model retains the same context guarantees as the built-in prompt.
+    let header = workspace_override().unwrap_or_else(|| default_template(zh));
+    out.push_str(&header);
+    if !out.ends_with('\n') {
+        out.push('\n');
     }
 
     out.push('\n');
@@ -72,6 +61,41 @@ pub fn default(config: &AppConfig, tools: &[ToolSchema]) -> String {
     }
 
     out
+}
+
+fn workspace_override() -> Option<String> {
+    let cwd = env::current_dir().ok()?;
+    let path = cwd.join(".pi").join("system.md");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn default_template(zh: bool) -> String {
+    if zh {
+        String::from(
+            "你是 Pi，一个本地优先、面向中文用户的命令行 AI 编程助手。\n\n\
+            行为准则：\n\
+            - 默认简体中文回答，技术名词保留英文。\n\
+            - 输出务必简洁、可执行；除非用户要求，不写多余前言。\n\
+            - 修改文件、执行命令、访问网络前必须通过工具，并接受权限策略约束。\n\
+            - 遇到不确定的代码或 API，先用 read / search / grep 工具确认，再行动。\n\
+            - 使用提供的工具完成任务；只在确实没有合适工具时才给出文字回答。\n",
+        )
+    } else {
+        String::from(
+            "You are Pi, a local-first command-line AI coding assistant.\n\n\
+            Rules:\n\
+            - Be concise. Prefer actionable output over preamble.\n\
+            - All file mutations, command execution and network access go through tools.\n\
+            - Investigate with read/search/grep before making changes.\n\
+            - Prefer using provided tools instead of speculation.\n",
+        )
+    }
 }
 
 fn locale_tag(locale: &Locale) -> &'static str {
@@ -136,4 +160,34 @@ mod tests {
     fn day_zero_is_unix_epoch() {
         assert_eq!(days_to_ymd(0), (1970, 1, 1));
     }
+
+    #[test]
+    fn workspace_override_replaces_static_template_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".pi")).unwrap();
+        std::fs::write(
+            dir.path().join(".pi").join("system.md"),
+            "Custom workspace prompt header.\nLine 2.\n",
+        )
+        .unwrap();
+        // Switch cwd temporarily to the tempdir so workspace_override() finds
+        // the file. We use a guard pattern so other tests cannot race us —
+        // running tests in parallel could otherwise cd into each other's
+        // tempdirs. Acquire a module-level mutex to serialize.
+        let _guard = TEST_CWD_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = env::current_dir().unwrap();
+        env::set_current_dir(dir.path()).unwrap();
+        let config = AppConfig::default();
+        let prompt = default(&config, &[]);
+        env::set_current_dir(prev).unwrap();
+        assert!(
+            prompt.contains("Custom workspace prompt header."),
+            "expected override header, got: {prompt}"
+        );
+        // Dynamic tail should still be present.
+        assert!(prompt.contains("Environment:"));
+    }
+
+    use std::sync::Mutex;
+    static TEST_CWD_GUARD: Mutex<()> = Mutex::new(());
 }

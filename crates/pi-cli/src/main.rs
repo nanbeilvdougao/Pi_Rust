@@ -166,6 +166,10 @@ struct Cli {
     /// non-Linux and on kernels < 5.13.
     #[arg(long = "strict-sandbox", action = clap::ArgAction::SetTrue)]
     strict_sandbox: bool,
+    /// Boot with a workspace agent profile. Reads `.pi/agents/<name>.md`
+    /// (or `.toml`) and uses its contents as the system prompt override.
+    #[arg(long = "agent", value_name = "NAME")]
+    agent: Option<String>,
     #[arg(long = "list-sessions", action = clap::ArgAction::SetTrue)]
     list_sessions: bool,
     #[arg(long = "delete-session", value_name = "ID")]
@@ -544,6 +548,15 @@ fn run(cli: Cli) -> PiResult<()> {
     if cli.system.is_some() {
         config.system_prompt = cli.system.clone();
     }
+    if let Some(agent_name) = &cli.agent {
+        // `pi --agent <name>` boots a workspace-defined agent profile from
+        // `.pi/agents/<name>.{md,toml}`. The file body becomes the system
+        // prompt; an explicit `--system` still wins.
+        let body = load_agent_profile(agent_name)?;
+        if cli.system.is_none() {
+            config.system_prompt = Some(body);
+        }
+    }
     config.locale = cli_locale;
     config.permission_mode = cli_permission;
     config.stream = cli.stream;
@@ -740,6 +753,35 @@ fn print_tools() {
             );
         }
     }
+}
+
+fn load_agent_profile(name: &str) -> PiResult<String> {
+    let cwd = env::current_dir().map_err(|err| {
+        PiError::new(PiErrorKind::Io, format!("无法读取 cwd：{err}"))
+    })?;
+    let candidates = [
+        cwd.join(".pi").join("agents").join(format!("{name}.md")),
+        cwd.join(".pi").join("agents").join(format!("{name}.toml")),
+        cwd.join(".pi").join("agents").join(name),
+    ];
+    for path in candidates {
+        if path.exists() {
+            let text = std::fs::read_to_string(&path).map_err(|err| {
+                PiError::new(
+                    PiErrorKind::Io,
+                    format!("读取 {} 失败：{err}", path.display()),
+                )
+            })?;
+            return Ok(text.trim().to_string());
+        }
+    }
+    Err(PiError::new(
+        PiErrorKind::NotFound,
+        format!(
+            "未找到 agent profile：.pi/agents/{name}.(md|toml)。\n\
+            使用 `pi --list-resources` 或检查工作区 .pi/agents/ 目录。"
+        ),
+    ))
 }
 
 fn print_resources() -> PiResult<()> {
