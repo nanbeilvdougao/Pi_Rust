@@ -6,13 +6,17 @@
 //!   in env or pi-auth.
 //! - **Google Imagen** via Gemini's predict endpoint, gated on
 //!   `image_provider="imagen"` and `GEMINI_API_KEY` / `GOOGLE_API_KEY`.
+//! - **OpenRouter** at `https://openrouter.ai/api/v1/images/generations`
+//!   (OpenAI-compatible body); gated on `image_provider="openrouter"` and
+//!   `OPENROUTER_API_KEY`. Honors `OPENROUTER_IMAGE_MODEL` (default
+//!   `openrouter/sdxl`) so users can route to whichever image model their
+//!   account has access to.
 //!
 //! The tool intentionally requires *both* the Network capability (for the
 //! HTTPS call) and the WriteFile capability (for the on-disk artifact).
 //! The permission engine will reject calls that the user has not opted into.
 
 use std::env;
-use std::fs;
 use std::time::Duration;
 
 use pi_core::{PiError, PiErrorKind, PiResult, ToolSchema};
@@ -49,7 +53,7 @@ impl Tool for ImageGenerateTool {
                     "prompt": {"type": "string"},
                     "output_path": {"type": "string", "description": "保存到本地的路径，缺省 ./pi-image-<ts>.png"},
                     "size": {"type": "string", "default": "1024x1024"},
-                    "image_provider": {"type": "string", "enum": ["openai", "imagen"], "default": "openai"}
+                    "image_provider": {"type": "string", "enum": ["openai", "imagen", "openrouter"], "default": "openai"}
                 },
                 "required": ["prompt"],
                 "additionalProperties": false
@@ -95,6 +99,7 @@ impl Tool for ImageGenerateTool {
         let bytes = match provider {
             "openai" => call_openai(&parsed.prompt, size)?,
             "imagen" => call_imagen(&parsed.prompt)?,
+            "openrouter" => call_openrouter(&parsed.prompt, size)?,
             other => {
                 return Err(PiError::new(
                     PiErrorKind::InvalidInput,
@@ -153,6 +158,79 @@ fn call_openai(prompt: &str, size: &str) -> PiResult<Vec<u8>> {
         })?;
     decode_base64(b64)
         .ok_or_else(|| PiError::new(PiErrorKind::Provider, "OpenAI 返回的 base64 解码失败"))
+}
+
+fn call_openrouter(prompt: &str, size: &str) -> PiResult<Vec<u8>> {
+    let key = api_key("OPENROUTER_API_KEY", "openrouter")?;
+    let endpoint = env::var("OPENROUTER_BASE_URL")
+        .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
+    let url = format!("{}/images/generations", endpoint.trim_end_matches('/'));
+    let model = env::var("OPENROUTER_IMAGE_MODEL")
+        .unwrap_or_else(|_| "openrouter/sdxl".to_string());
+    let body = json!({
+        "model": model,
+        "prompt": prompt,
+        "size": size,
+        "response_format": "b64_json",
+        "n": 1,
+    });
+    let agent = http_agent();
+    let auth = format!("Bearer {key}");
+    let referer = env::var("OPENROUTER_HTTP_REFERER")
+        .unwrap_or_else(|_| "https://github.com/Shellmia0/Pi_Rust".to_string());
+    let title = env::var("OPENROUTER_TITLE").unwrap_or_else(|_| "Pi Rust".to_string());
+    let response = agent
+        .post(&url)
+        .set("content-type", "application/json")
+        .set("authorization", &auth)
+        .set("http-referer", &referer)
+        .set("x-title", &title)
+        .send_json(body)
+        .map_err(|err| {
+            PiError::new(
+                PiErrorKind::Network,
+                format!("OpenRouter images/generations 失败：{err}"),
+            )
+        })?;
+    let value: serde_json::Value = response.into_json().map_err(|err| {
+        PiError::new(
+            PiErrorKind::Provider,
+            format!("OpenRouter 响应解析失败：{err}"),
+        )
+    })?;
+    // Most OpenRouter image models follow OpenAI's data[0].b64_json shape;
+    // some return data[0].url which we fetch on the user's behalf.
+    if let Some(b64) = value
+        .pointer("/data/0/b64_json")
+        .and_then(|v| v.as_str())
+    {
+        return decode_base64(b64).ok_or_else(|| {
+            PiError::new(PiErrorKind::Provider, "OpenRouter 返回的 base64 解码失败")
+        });
+    }
+    if let Some(url) = value.pointer("/data/0/url").and_then(|v| v.as_str()) {
+        let bytes = agent
+            .get(url)
+            .call()
+            .map_err(|err| {
+                PiError::new(
+                    PiErrorKind::Network,
+                    format!("OpenRouter 图片地址下载失败：{err}"),
+                )
+            })?
+            .into_reader();
+        let mut buf = Vec::new();
+        use std::io::Read;
+        let mut limited = bytes.take(50 * 1024 * 1024);
+        limited.read_to_end(&mut buf).map_err(|err| {
+            PiError::new(PiErrorKind::Io, format!("OpenRouter 图像读取失败：{err}"))
+        })?;
+        return Ok(buf);
+    }
+    Err(PiError::new(
+        PiErrorKind::Provider,
+        "OpenRouter 响应缺少 data[0].b64_json 与 data[0].url",
+    ))
 }
 
 fn call_imagen(prompt: &str) -> PiResult<Vec<u8>> {
@@ -285,5 +363,19 @@ mod tests {
         let schema = ImageGenerateTool.schema();
         assert!(schema.mutates);
         assert_eq!(schema.name, "image_generate");
+    }
+
+    #[test]
+    fn schema_enum_includes_openrouter() {
+        let schema = ImageGenerateTool.schema();
+        let params = schema.parameters.as_ref().expect("parameters");
+        let providers = params
+            .pointer("/properties/image_provider/enum")
+            .and_then(|v| v.as_array())
+            .expect("provider enum");
+        let names: Vec<&str> = providers.iter().filter_map(|v| v.as_str()).collect();
+        assert!(names.contains(&"openai"));
+        assert!(names.contains(&"imagen"));
+        assert!(names.contains(&"openrouter"));
     }
 }

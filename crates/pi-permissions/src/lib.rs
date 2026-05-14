@@ -16,7 +16,9 @@
 use pi_core::{PiError, PiErrorKind, PiResult};
 use serde::{Deserialize, Serialize};
 
+pub mod landlock_apply;
 pub mod sandbox;
+pub use landlock_apply::{landlock_supported, restrict_self, LandlockOutcome, LandlockPlan};
 pub use sandbox::{apply_sandbox, detect_backend as detect_sandbox_backend, SandboxBackend};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,8 +26,11 @@ pub use sandbox::{apply_sandbox, detect_backend as detect_sandbox_backend, Sandb
 pub enum Capability {
     ReadFile,
     WriteFile,
+    DeleteFile,
+    ChangeMode,
     ExecuteCommand,
     Network,
+    BindSocket,
     Session,
     ExtensionHostcall,
 }
@@ -35,8 +40,11 @@ impl Capability {
         match self {
             Self::ReadFile => "read_file",
             Self::WriteFile => "write_file",
+            Self::DeleteFile => "delete_file",
+            Self::ChangeMode => "change_mode",
             Self::ExecuteCommand => "execute_command",
             Self::Network => "network",
+            Self::BindSocket => "bind_socket",
             Self::Session => "session",
             Self::ExtensionHostcall => "extension_hostcall",
         }
@@ -46,12 +54,29 @@ impl Capability {
         Some(match value {
             "read_file" => Self::ReadFile,
             "write_file" => Self::WriteFile,
+            "delete_file" => Self::DeleteFile,
+            "change_mode" => Self::ChangeMode,
             "execute_command" => Self::ExecuteCommand,
             "network" => Self::Network,
+            "bind_socket" => Self::BindSocket,
             "session" => Self::Session,
             "extension_hostcall" => Self::ExtensionHostcall,
             _ => return None,
         })
+    }
+
+    /// Whether the capability mutates state. Used by the engine's mode rules
+    /// to decide whether ReadOnly/Plan should reject by default.
+    pub fn is_mutating(self) -> bool {
+        matches!(
+            self,
+            Self::WriteFile
+                | Self::DeleteFile
+                | Self::ChangeMode
+                | Self::ExecuteCommand
+                | Self::Network
+                | Self::BindSocket
+        )
     }
 }
 
@@ -209,14 +234,21 @@ impl Default for SandboxProfile {
 
 impl SandboxProfile {
     pub fn allows(&self, request: &PermissionRequest) -> bool {
-        if request.capability == Capability::Network && !self.allow_network {
+        if matches!(
+            request.capability,
+            Capability::Network | Capability::BindSocket
+        ) && !self.allow_network
+        {
             return false;
         }
 
         if let Some(root) = &self.workspace_root {
             if matches!(
                 request.capability,
-                Capability::ReadFile | Capability::WriteFile
+                Capability::ReadFile
+                    | Capability::WriteFile
+                    | Capability::DeleteFile
+                    | Capability::ChangeMode
             ) {
                 return request.target.starts_with(root)
                     || self

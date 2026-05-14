@@ -44,6 +44,14 @@ pub const ACTIONS: &[&str] = &[
     "cursor-left",
     "cursor-right",
     "backspace",
+    "model-select",
+    "theme-select",
+    "login",
+    "settings",
+    "thinking-select",
+    "tree-select",
+    "show-images",
+    "extension-select",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -101,6 +109,50 @@ impl Default for KeyBindings {
         map.insert(
             "backspace".into(),
             vec![KeyChord::plain(KeyCode::Backspace)],
+        );
+        map.insert(
+            "model-select".into(),
+            vec![KeyChord::with_mods(
+                KeyCode::Char('m'),
+                KeyModifiers::CONTROL,
+            )],
+        );
+        map.insert(
+            "theme-select".into(),
+            vec![KeyChord::with_mods(
+                KeyCode::Char('t'),
+                KeyModifiers::CONTROL,
+            )],
+        );
+        map.insert(
+            "login".into(),
+            vec![KeyChord::with_mods(
+                KeyCode::Char('g'),
+                KeyModifiers::CONTROL,
+            )],
+        );
+        map.insert("settings".into(), vec![KeyChord::plain(KeyCode::F(3))]);
+        map.insert(
+            "thinking-select".into(),
+            vec![KeyChord::plain(KeyCode::F(2))],
+        );
+        map.insert(
+            "tree-select".into(),
+            vec![KeyChord::with_mods(
+                KeyCode::Char('p'),
+                KeyModifiers::CONTROL,
+            )],
+        );
+        map.insert(
+            "show-images".into(),
+            vec![KeyChord::with_mods(KeyCode::Char('i'), KeyModifiers::ALT)],
+        );
+        map.insert(
+            "extension-select".into(),
+            vec![KeyChord::with_mods(
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+            )],
         );
         Self { map }
     }

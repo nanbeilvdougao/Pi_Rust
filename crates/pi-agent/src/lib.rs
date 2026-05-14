@@ -33,6 +33,7 @@ use pi_providers::{provider_for, Provider, ProviderRequest, ProviderResponse};
 use pi_session::{Session, SessionStore};
 use pi_tools::{ToolCall, ToolRuntime};
 
+pub mod branch_summary;
 pub mod compaction;
 pub mod fs_watch;
 pub mod settings;
@@ -40,6 +41,9 @@ pub mod skills;
 pub mod slash;
 pub mod source_info;
 pub mod system_prompt;
+pub use branch_summary::{
+    merge_summaries, Branch, BranchSummarizer, BranchSummarizerConfig, BranchSummaryEntry,
+};
 pub use compaction::{maybe_compact, CompactionReport};
 pub use fs_watch::{WatchedState, WorkspaceWatcher};
 pub use settings::PersistedSettings;

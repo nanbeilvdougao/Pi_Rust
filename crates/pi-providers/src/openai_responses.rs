@@ -164,6 +164,22 @@ fn endpoint() -> String {
     format!("{}/responses", base.trim_end_matches('/'))
 }
 
+pub(crate) fn build_request_body_pub(request: &ProviderRequest, stream: bool) -> Value {
+    build_request_body(request, stream)
+}
+
+pub(crate) fn parse_response_pub(value: Value) -> PiResult<ProviderResponse> {
+    parse_response(value)
+}
+
+pub(crate) fn parse_function_call_pub(item: &Value) -> ToolInvocation {
+    parse_function_call(item)
+}
+
+pub(crate) fn parse_usage_pub(value: &Value) -> Usage {
+    parse_usage(value)
+}
+
 fn build_request_body(request: &ProviderRequest, stream: bool) -> Value {
     let mut input: Vec<Value> = Vec::new();
     if let Some(system) = &request.system_prompt {

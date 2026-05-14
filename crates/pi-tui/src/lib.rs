@@ -52,6 +52,8 @@ pub mod config_selector;
 pub mod editor;
 pub mod footer;
 pub mod keybindings;
+pub mod markdown;
+pub mod overlay;
 pub mod session_picker;
 pub mod terminal_image;
 pub mod theme;
@@ -191,6 +193,9 @@ struct AppState {
     completion_span: Option<TriggerSpan>,
     pending_attachments: Vec<Attachment>,
     last_error: Option<String>,
+    overlay: Option<overlay::Overlay>,
+    tool_progress: std::collections::BTreeMap<String, Vec<String>>,
+    active_tool: Option<String>,
 }
 
 impl AppState {
@@ -211,6 +216,9 @@ impl AppState {
             completion_span: None,
             pending_attachments: Vec::new(),
             last_error: None,
+            overlay: None,
+            tool_progress: std::collections::BTreeMap::new(),
+            active_tool: None,
         }
     }
 
@@ -256,10 +264,16 @@ where
     let completer = cwd.as_ref().map(Completer::new);
     let slash_registry = pi_agent::SlashRegistry::builtin();
     let keys = KeyBindings::load_layered(cwd.as_deref());
+    let mut theme = theme;
 
     loop {
         terminal
-            .draw(|frame| draw(frame, agent, &state, active_turn.is_some(), &theme))
+            .draw(|frame| {
+                draw(frame, agent, &state, active_turn.is_some(), &theme);
+                if let Some(overlay_state) = &state.overlay {
+                    overlay::draw(frame, frame.area(), overlay_state, &theme);
+                }
+            })
             .map_err(|err| io_error(err.to_string()))?;
 
         if let Some(handle) = active_turn.as_mut() {
@@ -305,6 +319,50 @@ where
                         agent.cancel();
                         state.status = "正在中断…".to_string();
                     }
+                    continue;
+                }
+                // Overlay hijacks all keys until resolved.
+                if state.overlay.is_some() {
+                    let outcome = state.overlay.as_mut().map(|o| o.handle_key(&key));
+                    if let Some(outcome) = outcome {
+                        apply_overlay_outcome(&mut state, &mut theme, agent, outcome);
+                    }
+                    continue;
+                }
+                // Open overlays based on keybindings.
+                if keys.matches("model-select", &key) {
+                    state.overlay = Some(build_model_overlay(agent));
+                    continue;
+                }
+                if keys.matches("theme-select", &key) {
+                    state.overlay = Some(build_theme_overlay());
+                    continue;
+                }
+                if keys.matches("settings", &key) {
+                    state.overlay = Some(build_settings_overlay(agent));
+                    continue;
+                }
+                if keys.matches("thinking-select", &key) {
+                    state.overlay = Some(build_thinking_overlay(agent));
+                    continue;
+                }
+                if keys.matches("tree-select", &key) {
+                    if let Some(cwd) = std::env::current_dir().ok() {
+                        state.overlay =
+                            Some(overlay::Overlay::Tree(overlay::TreeOverlay::new(cwd)));
+                    }
+                    continue;
+                }
+                if keys.matches("show-images", &key) {
+                    state.overlay = Some(build_images_overlay(&state));
+                    continue;
+                }
+                if keys.matches("login", &key) {
+                    state.overlay = Some(build_login_overlay());
+                    continue;
+                }
+                if keys.matches("extension-select", &key) {
+                    state.overlay = Some(build_extension_overlay(&cwd));
                     continue;
                 }
                 if state.show_quit_confirm {
@@ -513,11 +571,42 @@ fn apply_stream_event(state: &mut AppState, event: Event) {
                 TranscriptKind::System,
                 format!("→ tool {name}: {}", truncate(&input, 200)),
             );
+            state.active_tool = Some(name.clone());
+            state
+                .tool_progress
+                .entry(name)
+                .or_default()
+                .clear();
+        }
+        Event::ToolProgress { name, line } => {
+            let lines = state.tool_progress.entry(name).or_default();
+            lines.push(truncate(&line, 240));
+            if lines.len() > 200 {
+                let drop = lines.len() - 200;
+                lines.drain(0..drop);
+            }
         }
         Event::ToolFinished { name, output } => {
-            state.push_entry(TranscriptKind::Tool, format!("[{name}]\n{output}"));
+            state.tool_progress.remove(&name);
+            if state.active_tool.as_deref() == Some(name.as_str()) {
+                state.active_tool = None;
+            }
+            // Bash gets a dedicated transcript kind for the bash-execution
+            // widget; everything else falls back to the generic tool body.
+            if name == "bash" || name == "shell" {
+                state.push_entry(
+                    TranscriptKind::Tool,
+                    format!("$ {name}\n{}", output.trim_end()),
+                );
+            } else {
+                state.push_entry(TranscriptKind::Tool, format!("[{name}]\n{output}"));
+            }
         }
         Event::ToolError { name, error } => {
+            state.tool_progress.remove(&name);
+            if state.active_tool.as_deref() == Some(name.as_str()) {
+                state.active_tool = None;
+            }
             state.push_entry(TranscriptKind::Error, format!("tool {name} 出错：{error}"));
         }
         Event::Usage(usage) => {
@@ -527,9 +616,28 @@ fn apply_stream_event(state: &mut AppState, event: Event) {
             );
         }
         Event::Compacted { before, after } => {
+            let saved = before.saturating_sub(after);
+            let pct = if before > 0 {
+                (saved as f32 / before as f32) * 100.0
+            } else {
+                0.0
+            };
+            let bar_len: usize = 20;
+            let filled = if before == 0 {
+                0
+            } else {
+                ((after as usize) * bar_len) / (before as usize)
+            };
+            let bar = format!(
+                "[{}{}]",
+                "█".repeat(filled.min(bar_len)),
+                "░".repeat(bar_len - filled.min(bar_len))
+            );
             state.push_entry(
                 TranscriptKind::System,
-                format!("[compaction] {before} -> {after} tokens"),
+                format!(
+                    "✦ 上下文压缩完成\n  {bar}\n  {before} → {after} tokens (节省 {saved}，约 {pct:.1}%)"
+                ),
             );
         }
         Event::Cancelled => {
@@ -637,6 +745,51 @@ fn draw<S>(
         .wrap(Wrap { trim: false });
     frame.render_widget(input, chunks[2]);
 
+    if let Some(active) = state.active_tool.as_deref() {
+        if let Some(lines) = state.tool_progress.get(active) {
+            if !lines.is_empty() {
+                let tail: Vec<&str> = lines
+                    .iter()
+                    .rev()
+                    .take(6)
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>();
+                let body: Vec<Line<'static>> = tail
+                    .into_iter()
+                    .rev()
+                    .map(|line| Line::from(Span::raw(line.to_string())))
+                    .collect();
+                let popup_height = (body.len() as u16 + 2).min(10);
+                let popup_area = ratatui::layout::Rect {
+                    x: chunks[0].x,
+                    y: chunks[0].y + chunks[0].height.saturating_sub(popup_height),
+                    width: chunks[0].width,
+                    height: popup_height,
+                };
+                let title = if active == "bash" || active == "shell" {
+                    format!(" $ {active} (流式) ")
+                } else {
+                    format!(" tool {active} (流式) ")
+                };
+                let widget = Paragraph::new(body)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(title)
+                            .border_style(Style::default().fg(theme.tool))
+                            .title_style(
+                                Style::default()
+                                    .fg(theme.tool)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                    )
+                    .wrap(Wrap { trim: false });
+                frame.render_widget(ratatui::widgets::Clear, popup_area);
+                frame.render_widget(widget, popup_area);
+            }
+        }
+    }
+
     if !state.completions.is_empty() {
         let popup_height = (state.completions.len() as u16 + 2).min(10);
         let popup_width = chunks[2].width.saturating_sub(2);
@@ -695,8 +848,17 @@ fn build_transcript_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>>
             label,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )]));
-        for raw_line in entry.body.lines() {
-            lines.push(Line::from(Span::raw(raw_line.to_string())));
+        match entry.kind {
+            TranscriptKind::Assistant => {
+                for line in markdown::render(&entry.body, theme) {
+                    lines.push(line);
+                }
+            }
+            _ => {
+                for raw_line in entry.body.lines() {
+                    lines.push(Line::from(Span::raw(raw_line.to_string())));
+                }
+            }
         }
         lines.push(Line::from(""));
     }
@@ -707,8 +869,8 @@ fn build_transcript_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>>
                 .fg(theme.assistant)
                 .add_modifier(Modifier::BOLD),
         )]));
-        for raw_line in state.streaming_buffer.lines() {
-            lines.push(Line::from(Span::raw(raw_line.to_string())));
+        for line in markdown::render(&state.streaming_buffer, theme) {
+            lines.push(line);
         }
     }
     lines
@@ -872,6 +1034,327 @@ where
         rx,
         _join: join,
         _cancel: cancel,
+    }
+}
+
+// ============================================================================
+// Overlay wiring
+// ============================================================================
+
+fn build_model_overlay<S: SessionStore>(agent: &AgentRuntime<S>) -> overlay::Overlay {
+    use pi_providers::ProviderRegistry;
+    let _ = agent;
+    let registry = ProviderRegistry::builtin();
+    let mut items = Vec::new();
+    for info in registry.list() {
+        for model in &info.supported_models {
+            items.push(overlay::ModelItem {
+                provider: info.id.clone(),
+                model: model.clone(),
+                display_name: info.display_name.clone(),
+            });
+        }
+    }
+    overlay::Overlay::Model(overlay::ListOverlay::new("选择 provider / model", items))
+}
+
+fn build_theme_overlay() -> overlay::Overlay {
+    overlay::Overlay::Theme(overlay::ListOverlay::new(
+        "切换主题",
+        vec![
+            overlay::ThemeItem {
+                id: "dark".into(),
+                label: "Dark".into(),
+            },
+            overlay::ThemeItem {
+                id: "light".into(),
+                label: "Light".into(),
+            },
+            overlay::ThemeItem {
+                id: "solarized".into(),
+                label: "Solarized".into(),
+            },
+        ],
+    ))
+}
+
+fn build_settings_overlay<S: SessionStore>(agent: &AgentRuntime<S>) -> overlay::Overlay {
+    let config = agent.config();
+    let items = vec![
+        overlay::SettingItem {
+            id: "stream".into(),
+            label: "stream".into(),
+            value: bool_label(config.stream),
+        },
+        overlay::SettingItem {
+            id: "tools_enabled".into(),
+            label: "tools_enabled".into(),
+            value: bool_label(config.tools_enabled),
+        },
+        overlay::SettingItem {
+            id: "print_mode".into(),
+            label: "print_mode".into(),
+            value: bool_label(config.print_mode),
+        },
+        overlay::SettingItem {
+            id: "permission_mode".into(),
+            label: "permission_mode".into(),
+            value: format!("{:?}", config.permission_mode),
+        },
+        overlay::SettingItem {
+            id: "compaction_threshold".into(),
+            label: "compaction_threshold".into(),
+            value: format!("{:.2}", config.compaction_threshold),
+        },
+    ];
+    overlay::Overlay::Settings(overlay::ListOverlay::new(
+        "设置 (Enter 切换 / 调整)",
+        items,
+    ))
+}
+
+fn bool_label(value: bool) -> String {
+    if value {
+        "on".into()
+    } else {
+        "off".into()
+    }
+}
+
+fn build_thinking_overlay<S: SessionStore>(agent: &AgentRuntime<S>) -> overlay::Overlay {
+    let current = agent.config().thinking_level;
+    let mut items = vec![
+        overlay::ThinkingItem {
+            id: "none".into(),
+            label: "无 (none)".into(),
+            description: "不启用扩展思考".into(),
+        },
+        overlay::ThinkingItem {
+            id: "low".into(),
+            label: "低 (low)".into(),
+            description: "少量推理预算".into(),
+        },
+        overlay::ThinkingItem {
+            id: "medium".into(),
+            label: "中 (medium)".into(),
+            description: "默认推理预算".into(),
+        },
+        overlay::ThinkingItem {
+            id: "high".into(),
+            label: "高 (high)".into(),
+            description: "最大推理预算".into(),
+        },
+    ];
+    // Pre-select current.
+    let mut list = overlay::ListOverlay::new("思考预算", items.drain(..).collect());
+    list.selected = match current {
+        pi_core::ThinkingLevel::None => 0,
+        pi_core::ThinkingLevel::Low => 1,
+        pi_core::ThinkingLevel::Medium => 2,
+        pi_core::ThinkingLevel::High => 3,
+    };
+    overlay::Overlay::Thinking(list)
+}
+
+fn build_images_overlay(state: &AppState) -> overlay::Overlay {
+    use pi_core::AttachmentData;
+    let items: Vec<overlay::ImageItem> = state
+        .pending_attachments
+        .iter()
+        .enumerate()
+        .map(|(idx, att)| {
+            let (label, bytes) = match &att.data {
+                AttachmentData::Base64 { data } => (
+                    format!("#{}  {} (base64)", idx + 1, att.mime_type),
+                    data.len(),
+                ),
+                AttachmentData::Url { url } => {
+                    (format!("#{}  {url}", idx + 1), url.len())
+                }
+            };
+            overlay::ImageItem { label, bytes }
+        })
+        .collect();
+    overlay::Overlay::ShowImages(overlay::ListOverlay::new(
+        "待发送图片 (Enter 移除)",
+        items,
+    ))
+}
+
+fn build_login_overlay() -> overlay::Overlay {
+    use pi_providers::ProviderRegistry;
+    let registry = ProviderRegistry::builtin();
+    let providers: Vec<overlay::LoginProvider> = registry
+        .list()
+        .filter_map(|info| {
+            if info.id == "echo" {
+                return None;
+            }
+            let supports_oauth = matches!(info.id.as_str(), "anthropic" | "openai");
+            Some(overlay::LoginProvider {
+                id: info.id.clone(),
+                display_name: info.display_name.clone(),
+                supports_oauth,
+                api_key_env: info.requires_api_key_env.clone(),
+            })
+        })
+        .collect();
+    overlay::Overlay::Login(overlay::LoginOverlay::new(providers))
+}
+
+fn build_extension_overlay(cwd: &Option<std::path::PathBuf>) -> overlay::Overlay {
+    let mut items: Vec<overlay::ExtensionItem> = Vec::new();
+    if let Some(root) = cwd.as_ref().map(|c| c.join(".pi").join("extensions")) {
+        if let Ok(read) = std::fs::read_dir(&root) {
+            for entry in read.flatten() {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                items.push(overlay::ExtensionItem {
+                    id: name.clone(),
+                    label: name,
+                    enabled: true,
+                });
+            }
+        }
+    }
+    if items.is_empty() {
+        items.push(overlay::ExtensionItem {
+            id: "(none)".into(),
+            label: "未发现扩展 — 把 wasm/process 模块放到 .pi/extensions/".into(),
+            enabled: false,
+        });
+    }
+    overlay::Overlay::Extension(overlay::ListOverlay::new("扩展", items))
+}
+
+fn apply_overlay_outcome<S: SessionStore>(
+    state: &mut AppState,
+    theme: &mut Theme,
+    agent: &mut AgentRuntime<S>,
+    outcome: overlay::OverlayOutcome,
+) {
+    match outcome {
+        overlay::OverlayOutcome::None => {}
+        overlay::OverlayOutcome::Close => {
+            state.overlay = None;
+        }
+        overlay::OverlayOutcome::SetModel { provider, model } => {
+            agent.config_mut().model.provider = provider.clone();
+            agent.config_mut().model.model = model.clone();
+            state.status = format!("已切换到 {provider} / {model}");
+            state.overlay = None;
+        }
+        overlay::OverlayOutcome::SetTheme(id) => {
+            *theme = Theme::from_base(&id);
+            state.status = format!("主题切换到 {id}");
+            state.overlay = None;
+        }
+        overlay::OverlayOutcome::ToggleSetting(id) => {
+            let cfg = agent.config_mut();
+            match id.as_str() {
+                "stream" => cfg.stream = !cfg.stream,
+                "tools_enabled" => cfg.tools_enabled = !cfg.tools_enabled,
+                "print_mode" => cfg.print_mode = !cfg.print_mode,
+                "permission_mode" => {
+                    cfg.permission_mode = next_permission_mode(cfg.permission_mode);
+                }
+                "compaction_threshold" => {
+                    cfg.compaction_threshold = match cfg.compaction_threshold {
+                        x if x >= 0.95 => 0.50,
+                        x => (x + 0.05).min(0.95),
+                    };
+                }
+                _ => {}
+            }
+            // Refresh overlay items so labels update in place.
+            state.overlay = Some(build_settings_overlay(agent));
+            state.status = format!("已切换 {id}");
+        }
+        overlay::OverlayOutcome::SetThinking(id) => {
+            if let Some(level) = pi_core::ThinkingLevel::from_str(&id) {
+                agent.config_mut().thinking_level = level;
+                state.status = format!("思考预算：{}", level.as_str());
+            }
+            state.overlay = None;
+        }
+        overlay::OverlayOutcome::AttachPath(path) => {
+            // Insert `@<relpath>` at cursor.
+            let rel = std::env::current_dir()
+                .ok()
+                .and_then(|cwd| path.strip_prefix(&cwd).ok().map(|p| p.to_path_buf()))
+                .unwrap_or_else(|| path.clone());
+            let token = format!(" @{}", rel.display());
+            state.input.insert_str(state.cursor, &token);
+            state.cursor += token.len();
+            state.status = format!("已加入 {}", path.display());
+            state.overlay = None;
+        }
+        overlay::OverlayOutcome::RemoveImage(idx) => {
+            if idx < state.pending_attachments.len() {
+                state.pending_attachments.remove(idx);
+                state.status = "已移除附件".into();
+            }
+            state.overlay = Some(build_images_overlay(state));
+        }
+        overlay::OverlayOutcome::ToggleExtension(id) => {
+            state.status = format!("扩展切换：{id} (重启 pi 生效)");
+            state.overlay = None;
+        }
+        overlay::OverlayOutcome::LoginSubmit(sub) => {
+            let result = handle_login_submit(&sub);
+            state.status = result;
+            state.overlay = None;
+        }
+    }
+}
+
+fn next_permission_mode(mode: pi_core::PermissionModeKind) -> pi_core::PermissionModeKind {
+    use pi_core::PermissionModeKind::*;
+    match mode {
+        ReadOnly => ConfirmMutations,
+        ConfirmMutations => TrustedWorkspace,
+        TrustedWorkspace => Plan,
+        Plan => ReadOnly,
+    }
+}
+
+fn handle_login_submit(sub: &overlay::LoginSubmission) -> String {
+    use pi_auth::encrypted_file::EncryptedFileStore;
+    use pi_auth::Resolver;
+    if sub.use_oauth {
+        return format!(
+            "OAuth: 请在浏览器完成 {} 登录 (PKCE)；pi 会监听 127.0.0.1 回调端口。",
+            sub.provider
+        );
+    }
+    let env_key = match sub.provider.as_str() {
+        "openai" | "openai-responses" => "OPENAI_API_KEY",
+        "anthropic" => "ANTHROPIC_API_KEY",
+        "gemini" => "GEMINI_API_KEY",
+        "moonshot" => "MOONSHOT_API_KEY",
+        "deepseek" => "DEEPSEEK_API_KEY",
+        "qwen" => "DASHSCOPE_API_KEY",
+        "zhipu" => "ZHIPU_API_KEY",
+        "openrouter" => "OPENROUTER_API_KEY",
+        "mistral" => "MISTRAL_API_KEY",
+        _ => "API_KEY",
+    };
+    let home = match std::env::var("HOME") {
+        Ok(v) => v,
+        Err(_) => return "找不到 $HOME，无法定位 ~/.pi-rust/auth.enc".to_string(),
+    };
+    let path = std::path::PathBuf::from(home)
+        .join(".pi-rust")
+        .join("auth.enc");
+    match EncryptedFileStore::open(path) {
+        Ok(mut store) => match store.store(&sub.provider, env_key, &sub.api_key) {
+            Ok(_) => format!("{} 凭证已加密保存到 ~/.pi-rust/auth.enc", sub.provider),
+            Err(err) => format!("保存失败：{err}"),
+        },
+        Err(err) => format!("加密存储不可用：{err}"),
     }
 }
 

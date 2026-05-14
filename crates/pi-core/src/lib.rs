@@ -220,6 +220,42 @@ pub struct AppConfig {
     pub context_window_tokens: u32,
     #[serde(default = "default_compaction_threshold")]
     pub compaction_threshold: f32,
+    #[serde(default)]
+    pub thinking_level: ThinkingLevel,
+}
+
+/// Reasoning budget for providers that support extended thinking (Anthropic
+/// extended thinking, OpenAI o-series). Maps to provider-specific knobs in
+/// `pi-providers`; absent or `None` means "let the model decide".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingLevel {
+    #[default]
+    None,
+    Low,
+    Medium,
+    High,
+}
+
+impl ThinkingLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThinkingLevel::None => "none",
+            ThinkingLevel::Low => "low",
+            ThinkingLevel::Medium => "medium",
+            ThinkingLevel::High => "high",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "none" | "off" | "" => Some(Self::None),
+            "low" => Some(Self::Low),
+            "medium" | "med" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -253,6 +289,7 @@ impl Default for AppConfig {
             permission_mode: PermissionModeKind::default(),
             context_window_tokens: default_context_window(),
             compaction_threshold: default_compaction_threshold(),
+            thinking_level: ThinkingLevel::None,
         }
     }
 }
@@ -293,6 +330,7 @@ pub enum Event {
     ThinkingDelta(String),
     ProviderStream(StreamEvent),
     ToolStarted { name: String, input: String },
+    ToolProgress { name: String, line: String },
     ToolFinished { name: String, output: String },
     ToolError { name: String, error: String },
     PermissionDecision { capability: String, allowed: bool },

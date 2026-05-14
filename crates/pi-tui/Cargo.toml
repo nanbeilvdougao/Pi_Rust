@@ -17,6 +17,7 @@ pi-agent = { path = "../pi-agent" }
 pi-auth = { path = "../pi-auth", default-features = false, features = ["encrypted-file"] }
 pi-session = { path = "../pi-session" }
 pi-tools = { path = "../pi-tools" }
+pi-providers = { path = "../pi-providers" }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 unicode-width = { workspace = true }
@@ -24,6 +25,8 @@ walkdir = { workspace = true }
 arboard = { workspace = true, optional = true }
 serde = { workspace = true }
 toml = { workspace = true }
+pulldown-cmark = { workspace = true }
+rpassword = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

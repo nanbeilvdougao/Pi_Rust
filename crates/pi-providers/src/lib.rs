@@ -35,6 +35,7 @@ pub mod faux;
 pub mod gemini;
 pub mod ollama;
 pub mod openai;
+pub mod openai_codex_responses;
 pub mod openai_responses;
 pub mod probe;
 pub mod sigv4;
@@ -46,6 +47,7 @@ pub use bedrock::BedrockProvider;
 pub use cloudflare::CloudflareProvider;
 pub use copilot::CopilotProvider;
 pub use faux::{FauxProvider, FauxTurn};
+pub use openai_codex_responses::OpenAiCodexResponsesProvider;
 pub use openai_responses::OpenAiResponsesProvider;
 pub use probe::{probe_all, ProbeOutcome, ProbeReport};
 pub use vertex::VertexProvider;
@@ -259,6 +261,7 @@ impl ProviderRegistry {
         registry.register(openai::openrouter_info());
         registry.register(openai::mistral_info());
         registry.register(openai_responses::openai_responses_info());
+        registry.register(openai_codex_responses::openai_codex_responses_info());
         registry.register(vertex::vertex_info());
         registry
     }
