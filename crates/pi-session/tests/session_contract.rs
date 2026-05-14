@@ -31,10 +31,8 @@ fn jsonl_store_appends_and_loads_messages() {
 
 #[test]
 fn jsonl_store_manages_session_lifecycle() {
-    let root = std::env::temp_dir().join(format!(
-        "pi-rust-session-lifecycle-{}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("pi-rust-session-lifecycle-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let store = JsonlSessionStore::new(&root);
 

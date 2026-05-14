@@ -13,6 +13,12 @@ pi-permissions = { path = "../pi-permissions" }
 pi-providers = { path = "../pi-providers" }
 pi-session = { path = "../pi-session" }
 pi-tools = { path = "../pi-tools" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

@@ -10,6 +10,15 @@ rust-version.workspace = true
 [dependencies]
 pi-core = { path = "../pi-core" }
 pi-permissions = { path = "../pi-permissions" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+walkdir = { workspace = true }
+regex = { workspace = true }
+globset = { workspace = true }
+similar = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,14 +1,41 @@
+//! Provider trait and built-in implementations.
+//!
+//! Design:
+//! - `Provider` exposes one synchronous `complete` for non-streaming callers
+//!   and a `stream` method that drives a [`StreamSink`] with incremental
+//!   `StreamEvent`s. The default `stream` falls back to invoking `complete`
+//!   and replaying its captured events; real providers (OpenAI-compatible,
+//!   Anthropic, Ollama, Gemini) override it with a true SSE pump.
+//! - JSON request/response shapes live in private `wire` modules and use
+//!   serde. The legacy hand-rolled escaper is kept only as a fallback for
+//!   the Ollama provider's `application/x-ndjson` stream lines, which is
+//!   already strict JSON per chunk.
+//! - HTTP transport is `ureq` with native-tls. We deliberately avoid pulling
+//!   tokio so the agent loop stays synchronous and the binary stays small.
+
 use std::collections::BTreeMap;
 use std::env;
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::process::Command;
+use std::io::{BufRead, BufReader, Read};
 use std::time::Duration;
 
 use pi_core::{
-    escape_json_string, Message, ModelSelection, PiError, PiErrorKind, PiResult, Role,
-    StreamEvent, ToolInvocation, ToolSchema,
+    Message, ModelSelection, PiError, PiErrorKind, PiResult, Role, StreamEvent, StreamSink,
+    ToolInvocation, ToolSchema, Usage,
 };
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+pub mod aliases;
+pub mod anthropic;
+pub mod faux;
+pub mod gemini;
+pub mod ollama;
+pub mod openai;
+pub mod probe;
+
+pub use aliases::{resolve_alias, ResolvedSelection};
+pub use faux::{FauxProvider, FauxTurn};
+pub use probe::{probe_all, ProbeOutcome, ProbeReport};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderInfo {
@@ -20,24 +47,68 @@ pub struct ProviderInfo {
     pub requires_api_key_env: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProviderRequest {
     pub model: ModelSelection,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSchema>,
+    pub system_prompt: Option<String>,
+    pub max_output_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub stream: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl ProviderRequest {
+    pub fn new(model: ModelSelection, messages: Vec<Message>) -> Self {
+        Self {
+            model,
+            messages,
+            tools: Vec::new(),
+            system_prompt: None,
+            max_output_tokens: None,
+            temperature: None,
+            stream: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProviderResponse {
     pub message: Message,
     pub events: Vec<String>,
     pub stream_events: Vec<StreamEvent>,
     pub tool_calls: Vec<ToolInvocation>,
+    pub usage: Usage,
 }
 
-pub trait Provider {
+pub trait Provider: Send + Sync {
     fn info(&self) -> ProviderInfo;
+
+    /// Non-streaming completion. Implementations should still populate
+    /// `stream_events` with a synthetic sequence (`MessageStart`, `TextDelta`,
+    /// `MessageDone`) so consumers always see the same event shape.
     fn complete(&self, request: ProviderRequest) -> PiResult<ProviderResponse>;
+
+    /// Streaming completion. Default replays `complete()` through the sink so
+    /// providers can opt-in to real SSE incrementally without breaking the
+    /// trait. Override this when SSE is actually wired.
+    fn stream(
+        &self,
+        request: ProviderRequest,
+        sink: &mut dyn StreamSink,
+    ) -> PiResult<ProviderResponse> {
+        let mut request = request;
+        request.stream = false;
+        let response = self.complete(request)?;
+        for event in &response.stream_events {
+            if sink.cancelled() {
+                sink.emit(StreamEvent::MessageDone)?;
+                return Err(PiError::new(PiErrorKind::Cancelled, "请求已被中断"));
+            }
+            sink.emit(event.clone())?;
+        }
+        Ok(response)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -63,11 +134,13 @@ impl Provider for EchoProvider {
             .find(|message| message.role == Role::Tool)
         {
             let content = format!("工具结果已返回：{}", tool_message.content);
+            let stream_events = text_stream_events(&content);
             return Ok(ProviderResponse {
                 message: Message::new(Role::Assistant, content.clone()),
                 events: vec![content],
-                stream_events: text_stream_events(&content),
+                stream_events,
                 tool_calls: Vec::new(),
+                usage: Usage::default(),
             });
         }
 
@@ -85,141 +158,27 @@ impl Provider for EchoProvider {
                 events: Vec::new(),
                 stream_events: tool_call_stream_events(std::slice::from_ref(&call)),
                 tool_calls: vec![call],
+                usage: Usage::default(),
             });
         }
 
-        let content = format!(
-            "这是 Pi Rust MVP 的本地响应。已收到你的请求：{last_user}"
-        );
+        let content = format!("这是 Pi Rust 的本地响应。已收到你的请求：{last_user}");
+        let stream_events = text_stream_events(&content);
 
         Ok(ProviderResponse {
             message: Message::new(Role::Assistant, content.clone()),
             events: vec![content],
-            stream_events: text_stream_events(&content),
-            tool_calls: Vec::new(),
-        })
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct OllamaProvider;
-
-impl Provider for OllamaProvider {
-    fn info(&self) -> ProviderInfo {
-        ProviderInfo {
-            id: "ollama".to_string(),
-            display_name: "Ollama 本地模型".to_string(),
-            default_model: "qwen2.5:7b".to_string(),
-            supported_models: vec![
-                "qwen2.5:7b".to_string(),
-                "qwen2.5:3b".to_string(),
-                "llama3.1:8b".to_string(),
-                "deepseek-r1:7b".to_string(),
-            ],
-            local_first: true,
-            requires_api_key_env: None,
-        }
-    }
-
-    fn complete(&self, request: ProviderRequest) -> PiResult<ProviderResponse> {
-        let base_url = env::var("OLLAMA_BASE_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
-        let endpoint = HttpEndpoint::parse(&base_url)?;
-        let body = ollama_chat_body(&request);
-        let response = post_json(&endpoint, "/api/chat", &body)?;
-        let content = extract_ollama_message_content(&response).ok_or_else(|| {
-            PiError::new(
-                PiErrorKind::Provider,
-                "Ollama 响应中缺少 message.content 字段",
-            )
-        })?;
-
-        Ok(ProviderResponse {
-            message: Message::new(Role::Assistant, content.clone()),
-            events: vec![content],
-            stream_events: text_stream_events(&content),
-            tool_calls: Vec::new(),
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct OpenAiCompatibleProvider {
-    info: ProviderInfo,
-    api_key_env: &'static str,
-    endpoint: &'static str,
-}
-
-impl OpenAiCompatibleProvider {
-    pub fn moonshot() -> Self {
-        Self {
-            info: moonshot_info(),
-            api_key_env: "MOONSHOT_API_KEY",
-            endpoint: "https://api.moonshot.cn/v1/chat/completions",
-        }
-    }
-
-    pub fn deepseek() -> Self {
-        Self {
-            info: deepseek_info(),
-            api_key_env: "DEEPSEEK_API_KEY",
-            endpoint: "https://api.deepseek.com/chat/completions",
-        }
-    }
-
-    pub fn qwen() -> Self {
-        Self {
-            info: qwen_info(),
-            api_key_env: "DASHSCOPE_API_KEY",
-            endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-        }
-    }
-}
-
-impl Provider for OpenAiCompatibleProvider {
-    fn info(&self) -> ProviderInfo {
-        self.info.clone()
-    }
-
-    fn complete(&self, request: ProviderRequest) -> PiResult<ProviderResponse> {
-        let api_key = env::var(self.api_key_env).map_err(|_| {
-            PiError::new(
-                PiErrorKind::Provider,
-                format!("缺少环境变量 {}，无法调用 {}", self.api_key_env, self.info.id),
-            )
-        })?;
-        let body = openai_chat_body(&request);
-        let response = post_openai_compatible(self.endpoint, &api_key, &body)?;
-        let tool_calls = extract_openai_tool_calls(&response);
-        let content = extract_openai_message_content(&response).unwrap_or_default();
-        if content.is_empty() && tool_calls.is_empty() {
-            return Err(PiError::new(
-                PiErrorKind::Provider,
-                format!(
-                    "{} 响应中缺少 choices[0].message.content 或 tool_calls 字段",
-                    self.info.id
-                ),
-            ));
-        }
-        let events = if content.is_empty() {
-            Vec::new()
-        } else {
-            vec![content.clone()]
-        };
-        let stream_events = if tool_calls.is_empty() {
-            text_stream_events(&content)
-        } else {
-            tool_call_stream_events(&tool_calls)
-        };
-
-        Ok(ProviderResponse {
-            message: Message::new(Role::Assistant, content),
-            events,
             stream_events,
-            tool_calls,
+            tool_calls: Vec::new(),
+            usage: Usage::default(),
         })
     }
 }
+
+pub use self::anthropic::AnthropicProvider;
+pub use self::gemini::GeminiProvider;
+pub use self::ollama::OllamaProvider;
+pub use self::openai::{OpenAiCompatibleProvider, OpenAiProvider};
 
 fn parse_echo_tool_call(prompt: &str, tools: &[ToolSchema]) -> Option<ToolInvocation> {
     let rest = prompt.strip_prefix("CALL_TOOL ")?;
@@ -235,7 +194,7 @@ fn parse_echo_tool_call(prompt: &str, tools: &[ToolSchema]) -> Option<ToolInvoca
     })
 }
 
-fn text_stream_events(content: &str) -> Vec<StreamEvent> {
+pub fn text_stream_events(content: &str) -> Vec<StreamEvent> {
     if content.is_empty() {
         return Vec::new();
     }
@@ -247,7 +206,7 @@ fn text_stream_events(content: &str) -> Vec<StreamEvent> {
     ]
 }
 
-fn tool_call_stream_events(calls: &[ToolInvocation]) -> Vec<StreamEvent> {
+pub fn tool_call_stream_events(calls: &[ToolInvocation]) -> Vec<StreamEvent> {
     let mut events = vec![StreamEvent::MessageStart];
     for call in calls {
         events.push(StreamEvent::ToolCallDelta {
@@ -271,10 +230,15 @@ impl ProviderRegistry {
             providers: BTreeMap::new(),
         };
         registry.register(EchoProvider.info());
-        registry.register(ollama_info());
-        registry.register(moonshot_info());
-        registry.register(deepseek_info());
-        registry.register(qwen_info());
+        registry.register(ollama::ollama_info());
+        registry.register(openai::moonshot_info());
+        registry.register(openai::deepseek_info());
+        registry.register(openai::qwen_info());
+        registry.register(openai::zhipu_info());
+        registry.register(openai::minimax_info());
+        registry.register(openai::openai_info());
+        registry.register(anthropic::anthropic_info());
+        registry.register(gemini::gemini_info());
         registry
     }
 
@@ -300,515 +264,509 @@ impl ProviderRegistry {
     }
 }
 
+use std::sync::{Arc, RwLock};
+
+static TEST_PROVIDERS: once_cell_shim::Lazy<RwLock<Vec<(String, Arc<dyn Provider>)>>> =
+    once_cell_shim::Lazy::new(|| RwLock::new(Vec::new()));
+
+/// Register a fully constructed provider under a custom id so the agent can
+/// pick it up via `provider_for`. Used by the harness mode (`FauxProvider`).
+/// Returns a guard that automatically deregisters when dropped.
+pub fn register_test_provider(
+    id: impl Into<String>,
+    provider: Arc<dyn Provider>,
+) -> TestProviderGuard {
+    let id = id.into();
+    if let Ok(mut list) = TEST_PROVIDERS.write() {
+        list.retain(|(existing, _)| existing != &id);
+        list.push((id.clone(), provider));
+    }
+    TestProviderGuard { id }
+}
+
+pub struct TestProviderGuard {
+    id: String,
+}
+
+impl Drop for TestProviderGuard {
+    fn drop(&mut self) {
+        if let Ok(mut list) = TEST_PROVIDERS.write() {
+            list.retain(|(existing, _)| existing != &self.id);
+        }
+    }
+}
+
+fn lookup_test_provider(id: &str) -> Option<Arc<dyn Provider>> {
+    TEST_PROVIDERS.read().ok().and_then(|list| {
+        list.iter()
+            .find(|(existing, _)| existing == id)
+            .map(|(_, provider)| provider.clone())
+    })
+}
+
 pub fn provider_for(selection: &ModelSelection) -> PiResult<Box<dyn Provider>> {
+    if let Some(test) = lookup_test_provider(&selection.provider) {
+        return Ok(Box::new(SharedProvider(test)));
+    }
     match selection.provider.as_str() {
         "echo" => Ok(Box::new(EchoProvider)),
         "ollama" => Ok(Box::new(OllamaProvider)),
         "moonshot" => Ok(Box::new(OpenAiCompatibleProvider::moonshot())),
         "deepseek" => Ok(Box::new(OpenAiCompatibleProvider::deepseek())),
         "qwen" => Ok(Box::new(OpenAiCompatibleProvider::qwen())),
+        "zhipu" => Ok(Box::new(OpenAiCompatibleProvider::zhipu())),
+        "minimax" => Ok(Box::new(OpenAiCompatibleProvider::minimax())),
+        "openai" => Ok(Box::new(OpenAiProvider::new())),
+        "anthropic" => Ok(Box::new(AnthropicProvider::new())),
+        "gemini" => Ok(Box::new(GeminiProvider::new())),
         other => Err(PiError::new(
             PiErrorKind::Provider,
-            format!(
-                "provider `{other}` 已注册为目标能力，但 MVP 目前只实现本地 echo 执行路径"
-            ),
+            format!("provider `{other}` 暂未实现执行路径"),
         )),
     }
 }
 
-fn ollama_info() -> ProviderInfo {
-    ProviderInfo {
-        id: "ollama".to_string(),
-        display_name: "Ollama 本地模型".to_string(),
-        default_model: "qwen2.5:7b".to_string(),
-        supported_models: vec![
-            "qwen2.5:7b".to_string(),
-            "qwen2.5:3b".to_string(),
-            "llama3.1:8b".to_string(),
-            "deepseek-r1:7b".to_string(),
-        ],
-        local_first: true,
-        requires_api_key_env: None,
+struct SharedProvider(Arc<dyn Provider>);
+
+impl Provider for SharedProvider {
+    fn info(&self) -> ProviderInfo {
+        self.0.info()
+    }
+    fn complete(&self, request: ProviderRequest) -> PiResult<ProviderResponse> {
+        self.0.complete(request)
+    }
+    fn stream(
+        &self,
+        request: ProviderRequest,
+        sink: &mut dyn StreamSink,
+    ) -> PiResult<ProviderResponse> {
+        self.0.stream(request, sink)
     }
 }
 
-fn moonshot_info() -> ProviderInfo {
-    ProviderInfo {
-        id: "moonshot".to_string(),
-        display_name: "Moonshot 月之暗面".to_string(),
-        default_model: "moonshot-v1-8k".to_string(),
-        supported_models: vec!["moonshot-v1-8k".to_string(), "moonshot-v1-32k".to_string()],
-        local_first: false,
-        requires_api_key_env: Some("MOONSHOT_API_KEY".to_string()),
+mod once_cell_shim {
+    use std::sync::OnceLock;
+    pub struct Lazy<T>(OnceLock<T>, fn() -> T);
+    impl<T> Lazy<T> {
+        pub const fn new(init: fn() -> T) -> Self {
+            Self(OnceLock::new(), init)
+        }
+    }
+    impl<T> std::ops::Deref for Lazy<T> {
+        type Target = T;
+        fn deref(&self) -> &T {
+            self.0.get_or_init(self.1)
+        }
     }
 }
 
-fn deepseek_info() -> ProviderInfo {
-    ProviderInfo {
-        id: "deepseek".to_string(),
-        display_name: "DeepSeek".to_string(),
-        default_model: "deepseek-chat".to_string(),
-        supported_models: vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()],
-        local_first: false,
-        requires_api_key_env: Some("DEEPSEEK_API_KEY".to_string()),
+// ----- Shared HTTP plumbing ---------------------------------------------------
+
+pub(crate) fn http_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(30))
+        .timeout_read(Duration::from_secs(300))
+        .timeout_write(Duration::from_secs(60))
+        .user_agent(concat!("pi-rust/", env!("CARGO_PKG_VERSION")))
+        .build()
+}
+
+pub(crate) fn read_api_key(env_name: &str, provider_id: &str) -> PiResult<String> {
+    // 1) Process env variable (power-user override, no I/O).
+    if let Ok(value) = env::var(env_name) {
+        if !value.is_empty() {
+            return Ok(value);
+        }
     }
-}
-
-fn qwen_info() -> ProviderInfo {
-    ProviderInfo {
-        id: "qwen".to_string(),
-        display_name: "通义千问".to_string(),
-        default_model: "qwen-plus".to_string(),
-        supported_models: vec!["qwen-plus".to_string(), "qwen-turbo".to_string()],
-        local_first: false,
-        requires_api_key_env: Some("DASHSCOPE_API_KEY".to_string()),
+    // 2) pi-auth layered resolver (encrypted file + optional keyring).
+    use pi_auth::Resolver as _;
+    if let Ok(resolver) = pi_auth::layered_resolver() {
+        if let Ok(Some(value)) = resolver.lookup(provider_id, env_name) {
+            if !value.is_empty() {
+                return Ok(value);
+            }
+        }
     }
+    Err(PiError::new(
+        PiErrorKind::Provider,
+        format!(
+            "缺少凭证 {env_name}。设置环境变量、或运行 `pi auth set {provider_id}` 写入加密存储。"
+        ),
+    ))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HttpEndpoint {
-    host: String,
-    port: u16,
-}
-
-impl HttpEndpoint {
-    fn parse(base_url: &str) -> PiResult<Self> {
-        let without_scheme = base_url.strip_prefix("http://").ok_or_else(|| {
-            PiError::new(
-                PiErrorKind::Provider,
-                "MVP Ollama provider 仅支持 http:// OLLAMA_BASE_URL",
-            )
-        })?;
-        let authority = without_scheme.trim_end_matches('/');
-        let (host, port) = if let Some((host, port)) = authority.rsplit_once(':') {
-            let parsed_port = port.parse::<u16>().map_err(|_| {
-                PiError::new(PiErrorKind::Provider, "OLLAMA_BASE_URL 端口格式无效")
-            })?;
-            (host.to_string(), parsed_port)
-        } else {
-            (authority.to_string(), 80)
-        };
-
-        if host.is_empty() {
+pub(crate) fn post_json(
+    agent: &ureq::Agent,
+    url: &str,
+    body: &Value,
+    headers: &[(&str, &str)],
+) -> PiResult<Value> {
+    let mut req = agent.post(url).set("content-type", "application/json");
+    for (key, value) in headers {
+        req = req.set(key, value);
+    }
+    let response = match req.send_json(body) {
+        Ok(response) => response,
+        Err(ureq::Error::Status(status, response)) => {
+            let body = response.into_string().unwrap_or_default();
             return Err(PiError::new(
                 PiErrorKind::Provider,
-                "OLLAMA_BASE_URL 缺少主机名",
+                format!("HTTP {status}：{body}"),
             ));
         }
+        Err(ureq::Error::Transport(transport)) => {
+            return Err(PiError::new(
+                PiErrorKind::Network,
+                format!("HTTP 传输错误：{transport}"),
+            ));
+        }
+    };
+    let text = response
+        .into_string()
+        .map_err(|err| PiError::new(PiErrorKind::Network, format!("读取 HTTP 响应失败：{err}")))?;
+    serde_json::from_str(&text).map_err(|err| {
+        PiError::new(
+            PiErrorKind::Provider,
+            format!("响应不是有效 JSON：{err}; body={text}"),
+        )
+    })
+}
 
-        Ok(Self { host, port })
+pub(crate) fn post_sse_lines<F>(
+    agent: &ureq::Agent,
+    url: &str,
+    body: &Value,
+    headers: &[(&str, &str)],
+    mut on_line: F,
+) -> PiResult<()>
+where
+    F: FnMut(&str) -> PiResult<()>,
+{
+    let mut req = agent
+        .post(url)
+        .set("content-type", "application/json")
+        .set("accept", "text/event-stream");
+    for (key, value) in headers {
+        req = req.set(key, value);
+    }
+    let response = match req.send_json(body) {
+        Ok(response) => response,
+        Err(ureq::Error::Status(status, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            return Err(PiError::new(
+                PiErrorKind::Provider,
+                format!("HTTP {status}：{body}"),
+            ));
+        }
+        Err(ureq::Error::Transport(transport)) => {
+            return Err(PiError::new(
+                PiErrorKind::Network,
+                format!("HTTP 传输错误：{transport}"),
+            ));
+        }
+    };
+    read_sse(response.into_reader(), |event| on_line(event))
+}
+
+/// Exposed for benchmarks. Use `read_sse` privately in providers; this is a
+/// thin wrapper to avoid leaking `pub(crate)` to crates outside the workspace.
+pub fn read_sse_for_bench<R, F>(reader: R, on_event: F) -> PiResult<()>
+where
+    R: Read,
+    F: FnMut(&str) -> PiResult<()>,
+{
+    read_sse(reader, on_event)
+}
+
+pub(crate) fn read_sse<R, F>(reader: R, mut on_event: F) -> PiResult<()>
+where
+    R: Read,
+    F: FnMut(&str) -> PiResult<()>,
+{
+    let mut buf = BufReader::new(reader);
+    let mut data = String::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = buf.read_line(&mut line)?;
+        if read == 0 {
+            if !data.is_empty() {
+                on_event(data.trim_end())?;
+                data.clear();
+            }
+            return Ok(());
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            if !data.is_empty() {
+                let payload = data.trim_end_matches('\n').to_string();
+                data.clear();
+                on_event(&payload)?;
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("data:") {
+            let rest = rest.strip_prefix(' ').unwrap_or(rest);
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(rest);
+        } else if trimmed.starts_with(':') {
+            // SSE comment, skip
+            continue;
+        }
+        // Other prefixes (`event:`, `id:`) are unused for our streams.
     }
 }
 
-fn ollama_chat_body(request: &ProviderRequest) -> String {
-    let messages = request
-        .messages
-        .iter()
-        .map(|message| {
-            format!(
-                "{{\"role\":\"{}\",\"content\":\"{}\"}}",
-                message.role.as_str(),
-                escape_json_string(&message.content)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-
-    format!(
-        "{{\"model\":\"{}\",\"stream\":false,\"messages\":[{}]}}",
-        escape_json_string(&request.model.model),
-        messages
-    )
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OpenAiChatMessage {
+    pub role: String,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub content: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<OpenAiToolCall>,
 }
 
-fn openai_chat_body(request: &ProviderRequest) -> String {
-    let messages = request
-        .messages
-        .iter()
-        .map(|message| {
-            if message.role == Role::Tool {
-                if let Some(tool_call_id) = &message.tool_call_id {
-                    return format!(
-                        "{{\"role\":\"tool\",\"tool_call_id\":\"{}\",\"content\":\"{}\"}}",
-                        escape_json_string(tool_call_id),
-                        escape_json_string(&message.content)
-                    );
-                }
-                return format!(
-                    "{{\"role\":\"user\",\"content\":\"{}\"}}",
-                    escape_json_string(&format!("Tool result:\n{}", message.content))
-                );
-            }
-
-            format!(
-                "{{\"role\":\"{}\",\"content\":\"{}\"}}",
-                message.role.as_str(),
-                escape_json_string(&message.content)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-
-    let tools = openai_tools_body(&request.tools);
-    let tools_suffix = if tools.is_empty() {
-        String::new()
-    } else {
-        format!(",\"tools\":[{tools}],\"tool_choice\":\"auto\"")
-    };
-
-    format!(
-        "{{\"model\":\"{}\",\"stream\":false,\"messages\":[{}]{}}}",
-        escape_json_string(&request.model.model),
-        messages,
-        tools_suffix
-    )
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OpenAiToolCall {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(rename = "type", default = "default_function_type")]
+    pub kind: String,
+    pub function: OpenAiFunctionCall,
 }
 
-fn openai_tools_body(tools: &[ToolSchema]) -> String {
+fn default_function_type() -> String {
+    "function".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OpenAiFunctionCall {
+    pub name: String,
+    pub arguments: String,
+}
+
+pub(crate) fn messages_to_openai(messages: &[Message]) -> Vec<OpenAiChatMessage> {
+    messages
+        .iter()
+        .map(|message| match message.role {
+            Role::Tool => OpenAiChatMessage {
+                role: "tool".to_string(),
+                content: Value::String(message.content.clone()),
+                name: None,
+                tool_call_id: message.tool_call_id.clone(),
+                tool_calls: Vec::new(),
+            },
+            Role::Assistant if !message.tool_calls.is_empty() => OpenAiChatMessage {
+                role: "assistant".to_string(),
+                content: if message.content.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(message.content.clone())
+                },
+                name: message.name.clone(),
+                tool_call_id: None,
+                tool_calls: message
+                    .tool_calls
+                    .iter()
+                    .map(|call| OpenAiToolCall {
+                        id: call.id.clone(),
+                        kind: "function".to_string(),
+                        function: OpenAiFunctionCall {
+                            name: call.name.clone(),
+                            arguments: call.input.clone(),
+                        },
+                    })
+                    .collect(),
+            },
+            _ => OpenAiChatMessage {
+                role: message.role.as_str().to_string(),
+                content: build_openai_content(message),
+                name: message.name.clone(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            },
+        })
+        .collect()
+}
+
+fn build_openai_content(message: &Message) -> Value {
+    if message.attachments.is_empty() {
+        return Value::String(message.content.clone());
+    }
+    let mut parts: Vec<Value> = Vec::new();
+    if !message.content.is_empty() {
+        parts.push(json!({"type": "text", "text": message.content}));
+    }
+    for attachment in &message.attachments {
+        if attachment.kind != pi_core::AttachmentKind::Image {
+            continue;
+        }
+        if let Some(url) = attachment.data_url() {
+            parts.push(json!({
+                "type": "image_url",
+                "image_url": {"url": url}
+            }));
+        }
+    }
+    Value::Array(parts)
+}
+
+pub(crate) fn tools_to_openai(tools: &[ToolSchema]) -> Vec<Value> {
     tools
         .iter()
         .map(|tool| {
-            format!(
-                "{{\"type\":\"function\",\"function\":{{\"name\":\"{}\",\"description\":\"{} 输入格式: {}\",\"parameters\":{{\"type\":\"object\",\"properties\":{{\"input\":{{\"type\":\"string\",\"description\":\"工具输入，格式为 {}\"}}}},\"required\":[\"input\"],\"additionalProperties\":false}}}}}}",
-                escape_json_string(&tool.name),
-                escape_json_string(&tool.description),
-                escape_json_string(&tool.input_shape),
-                escape_json_string(&tool.input_shape)
-            )
+            json!({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters_or_default(),
+                }
+            })
         })
-        .collect::<Vec<_>>()
-        .join(",")
+        .collect()
 }
 
-fn post_openai_compatible(endpoint: &str, api_key: &str, body: &str) -> PiResult<String> {
-    let auth_header = format!("Authorization: Bearer {api_key}");
-    let output = Command::new("curl")
-        .args([
-            "--silent",
-            "--show-error",
-            "--fail-with-body",
-            "--max-time",
-            "120",
-            "-X",
-            "POST",
-            endpoint,
-            "-H",
-            "Content-Type: application/json",
-            "-H",
-            auth_header.as_str(),
-            "--data-binary",
-            body,
-        ])
-        .output()
-        .map_err(|err| {
-            PiError::new(
-                PiErrorKind::Provider,
-                format!("无法启动 curl 调用 provider：{err}"),
-            )
-        })?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+pub(crate) fn build_messages_with_system(request: &ProviderRequest) -> Vec<OpenAiChatMessage> {
+    let mut messages = Vec::new();
+    if let Some(system) = &request.system_prompt {
+        messages.push(OpenAiChatMessage {
+            role: "system".to_string(),
+            content: Value::String(system.clone()),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        });
+    }
+    let has_system = request.messages.iter().any(|m| m.role == Role::System);
+    let mapped = messages_to_openai(&request.messages);
+    if has_system || messages.is_empty() {
+        messages.clear();
+        messages.extend(mapped);
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Err(PiError::new(
-            PiErrorKind::Provider,
-            format!("provider 请求失败：{stderr}{stdout}"),
-        ))
+        messages.extend(mapped);
     }
+    messages
 }
 
-fn post_json(endpoint: &HttpEndpoint, path: &str, body: &str) -> PiResult<String> {
-    let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port)).map_err(|err| {
-        PiError::new(
-            PiErrorKind::Provider,
-            format!("无法连接 Ollama：{err}。请确认 `ollama serve` 正在运行。"),
-        )
-    })?;
-    stream.set_read_timeout(Some(Duration::from_secs(120)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(30)))?;
-
-    let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        endpoint.host,
-        body.len(),
-        body
-    );
-    stream.write_all(request.as_bytes())?;
-
-    let mut response = String::new();
-    stream.read_to_string(&mut response)?;
-    let (headers, body) = response.split_once("\r\n\r\n").ok_or_else(|| {
-        PiError::new(PiErrorKind::Provider, "Ollama HTTP 响应格式无效")
-    })?;
-
-    if !headers.starts_with("HTTP/1.1 200") && !headers.starts_with("HTTP/1.0 200") {
-        return Err(PiError::new(
-            PiErrorKind::Provider,
-            format!("Ollama 请求失败：{}", headers.lines().next().unwrap_or("未知状态")),
-        ));
+/// Default `stream` implementation used by providers that drive a `VecSink`
+/// from inside `complete` first. Tests rely on this helper.
+pub fn replay_through_sink(
+    response: ProviderResponse,
+    sink: &mut dyn StreamSink,
+) -> PiResult<ProviderResponse> {
+    for event in &response.stream_events {
+        sink.emit(event.clone())?;
     }
-
-    Ok(body.to_string())
+    Ok(response)
 }
 
-fn extract_ollama_message_content(response: &str) -> Option<String> {
-    let message_start = response.find("\"message\"")?;
-    let content_part = &response[message_start..];
-    extract_json_field(content_part, "content").map(unescape_json_string)
-}
-
-fn extract_openai_message_content(response: &str) -> Option<String> {
-    let message_start = response.find("\"message\"")?;
-    let content_part = &response[message_start..];
-    extract_json_string_field(content_part, "content")
-}
-
-fn extract_openai_tool_calls(response: &str) -> Vec<ToolInvocation> {
-    let mut calls = Vec::new();
-    let mut rest = response;
-
-    while let Some(function_idx) = rest.find("\"function\"") {
-        let function_part = &rest[function_idx..];
-        let name = match extract_json_string_field(function_part, "name") {
-            Some(name) => name,
-            None => break,
-        };
-        let arguments = extract_json_string_field(function_part, "arguments").unwrap_or_default();
-        let input = extract_tool_input(&arguments).unwrap_or(arguments);
-        let id_start = function_idx.saturating_sub(512);
-        let id = extract_json_string_field(&rest[id_start..function_idx], "id");
-
-        calls.push(ToolInvocation { id, name, input });
-
-        let advance = function_part
-            .find("\"arguments\"")
-            .map(|idx| idx + "\"arguments\"".len())
-            .unwrap_or(1);
-        rest = &function_part[advance..];
-    }
-
-    calls
-}
-
-fn extract_tool_input(arguments: &str) -> Option<String> {
-    extract_json_string_field(arguments, "input")
-}
-
-fn extract_json_field(input: &str, field: &str) -> Option<String> {
-    let needle = format!("\"{field}\":\"");
-    let start = input.find(&needle)? + needle.len();
-    let rest = &input[start..];
-    let mut out = String::new();
-    let mut escaped = false;
-    for ch in rest.chars() {
-        if escaped {
-            out.push(match ch {
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                other => other,
-            });
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == '"' {
-            return Some(out);
-        } else {
-            out.push(ch);
-        }
-    }
-    None
-}
-
-fn unescape_json_string(input: String) -> String {
-    input
-}
-
-fn extract_json_string_field(input: &str, field: &str) -> Option<String> {
-    let needle = format!("\"{field}\"");
-    let field_start = input.find(&needle)? + needle.len();
-    let mut chars = input[field_start..].char_indices();
-
-    for (_, ch) in chars.by_ref() {
-        if ch == ':' {
-            break;
-        }
-        if !ch.is_whitespace() {
-            return None;
-        }
-    }
-
-    let mut value_start = None;
-    for (idx, ch) in chars.by_ref() {
-        if ch == '"' {
-            value_start = Some(field_start + idx + ch.len_utf8());
-            break;
-        }
-        if !ch.is_whitespace() {
-            return None;
-        }
-    }
-
-    decode_json_string(&input[value_start?..])
-}
-
-fn decode_json_string(input: &str) -> Option<String> {
-    let mut out = String::new();
-    let mut escaped = false;
-    for ch in input.chars() {
-        if escaped {
-            out.push(match ch {
-                '"' => '"',
-                '\\' => '\\',
-                '/' => '/',
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                'b' => '\u{0008}',
-                'f' => '\u{000c}',
-                other => other,
-            });
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == '"' {
-            return Some(out);
-        } else {
-            out.push(ch);
-        }
-    }
-    None
+/// Helper that fills `stream_events` from a recorded sink so a streaming
+/// implementation can also satisfy callers that look at `stream_events` after
+/// the fact.
+pub fn capture_to_response(
+    events: Vec<StreamEvent>,
+    mut response: ProviderResponse,
+) -> ProviderResponse {
+    response.stream_events = events;
+    response
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pi_core::Role;
 
     #[test]
-    fn ollama_body_uses_chat_shape() {
-        let request = ProviderRequest {
-            model: ModelSelection {
-                provider: "ollama".to_string(),
-                model: "qwen2.5:7b".to_string(),
+    fn echo_responds_with_streaming_events() {
+        let provider = EchoProvider;
+        let request = ProviderRequest::new(
+            ModelSelection {
+                provider: "echo".into(),
+                model: "echo-local".into(),
             },
-            messages: vec![Message::new(Role::User, "你好")],
-            tools: Vec::new(),
-        };
-
-        let body = ollama_chat_body(&request);
-        assert!(body.contains("\"model\":\"qwen2.5:7b\""));
-        assert!(body.contains("\"stream\":false"));
-        assert!(body.contains("\"role\":\"user\""));
-        assert!(body.contains("你好"));
-    }
-
-    #[test]
-    fn extracts_ollama_message_content() {
-        let response = r#"{"message":{"role":"assistant","content":"你好，世界"}}"#;
-        assert_eq!(
-            extract_ollama_message_content(response),
-            Some("你好，世界".to_string())
+            vec![Message::new(Role::User, "你好")],
         );
-    }
-
-    #[test]
-    fn openai_body_includes_structured_tool_results() {
-        let request = ProviderRequest {
-            model: ModelSelection {
-                provider: "deepseek".to_string(),
-                model: "deepseek-chat".to_string(),
-            },
-            messages: vec![
-                Message::new(Role::User, "解释代码"),
-                Message::tool_result(Some("call_1".to_string()), "tool output"),
-            ],
-            tools: Vec::new(),
-        };
-
-        let body = openai_chat_body(&request);
-        assert!(body.contains("\"model\":\"deepseek-chat\""));
-        assert!(body.contains("解释代码"));
-        assert!(body.contains("\"role\":\"tool\""));
-        assert!(body.contains("\"tool_call_id\":\"call_1\""));
-        assert!(body.contains("tool output"));
-    }
-
-    #[test]
-    fn extracts_openai_message_content() {
-        let response = r#"{"choices":[{"message":{"role":"assistant","content":"可以"}}]}"#;
-        assert_eq!(
-            extract_openai_message_content(response),
-            Some("可以".to_string())
-        );
-    }
-
-    #[test]
-    fn openai_body_exposes_function_tools() {
-        let request = ProviderRequest {
-            model: ModelSelection {
-                provider: "deepseek".to_string(),
-                model: "deepseek-chat".to_string(),
-            },
-            messages: vec![Message::new(Role::User, "列目录")],
-            tools: vec![ToolSchema {
-                name: "ls".to_string(),
-                description: "列出目录内容".to_string(),
-                input_shape: "path".to_string(),
-                mutates: false,
-            }],
-        };
-
-        let body = openai_chat_body(&request);
-        assert!(body.contains("\"tools\""));
-        assert!(body.contains("\"tool_choice\":\"auto\""));
-        assert!(body.contains("\"name\":\"ls\""));
-        assert!(body.contains("\"input\""));
-    }
-
-    #[test]
-    fn extracts_openai_tool_calls() {
-        let response = concat!(
-            r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":["#,
-            r#"{"id":"call_1","type":"function","function":{"name":"ls","#,
-            r#""arguments":"{\"input\":\".\"}"}}]}}]}"#
-        );
-        let calls = extract_openai_tool_calls(response);
-
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].id.as_deref(), Some("call_1"));
-        assert_eq!(calls[0].name, "ls");
-        assert_eq!(calls[0].input, ".");
-    }
-
-    #[test]
-    fn stream_events_cover_text_and_tool_calls() {
-        let text_events = text_stream_events("hello");
-        assert_eq!(
-            text_events,
-            vec![
-                StreamEvent::MessageStart,
-                StreamEvent::TextDelta("hello".to_string()),
-                StreamEvent::MessageDone,
-            ]
-        );
-
-        let tool_events = tool_call_stream_events(&[ToolInvocation {
-            id: Some("call_1".to_string()),
-            name: "ls".to_string(),
-            input: ".".to_string(),
-        }]);
-
-        assert_eq!(tool_events.len(), 3);
-        assert!(matches!(tool_events[0], StreamEvent::MessageStart));
+        let response = provider.complete(request).expect("complete");
+        assert!(!response.stream_events.is_empty());
         assert!(matches!(
-            &tool_events[1],
-            StreamEvent::ToolCallDelta { id, name, input_delta }
-                if id.as_deref() == Some("call_1")
-                    && name.as_deref() == Some("ls")
-                    && input_delta == "."
+            response.stream_events[0],
+            StreamEvent::MessageStart
         ));
-        assert!(matches!(tool_events[2], StreamEvent::MessageDone));
+    }
+
+    #[test]
+    fn registry_lists_chinese_providers_first_class() {
+        let registry = ProviderRegistry::builtin();
+        for required in [
+            "echo",
+            "ollama",
+            "moonshot",
+            "deepseek",
+            "qwen",
+            "zhipu",
+            "minimax",
+            "openai",
+            "anthropic",
+            "gemini",
+        ] {
+            assert!(registry.get(required).is_some(), "missing: {required}");
+        }
+    }
+
+    #[test]
+    fn build_messages_injects_system_prompt() {
+        let mut request = ProviderRequest::new(
+            ModelSelection {
+                provider: "echo".into(),
+                model: "x".into(),
+            },
+            vec![Message::new(Role::User, "hi")],
+        );
+        request.system_prompt = Some("你是 Pi".to_string());
+        let messages = build_messages_with_system(&request);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[1].role, "user");
+    }
+
+    #[test]
+    fn sse_parser_splits_events_on_blank_lines() {
+        let body = b"data: hello\n\ndata: {\"x\":1}\n\n".to_vec();
+        let mut collected = Vec::new();
+        read_sse(body.as_slice(), |event| {
+            collected.push(event.to_string());
+            Ok(())
+        })
+        .expect("parse");
+        assert_eq!(
+            collected,
+            vec!["hello".to_string(), "{\"x\":1}".to_string()]
+        );
+    }
+
+    #[test]
+    fn streaming_default_replays_synthetic_events() {
+        let provider = EchoProvider;
+        let request = ProviderRequest::new(
+            ModelSelection {
+                provider: "echo".into(),
+                model: "echo-local".into(),
+            },
+            vec![Message::new(Role::User, "ping")],
+        );
+        let mut sink = pi_core::VecSink::default();
+        let response = provider.stream(request, &mut sink).expect("stream");
+        assert!(matches!(
+            sink.events.first(),
+            Some(StreamEvent::MessageStart)
+        ));
+        assert!(matches!(sink.events.last(), Some(StreamEvent::MessageDone)));
+        assert!(!response.message.content.is_empty());
     }
 }

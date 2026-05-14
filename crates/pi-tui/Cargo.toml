@@ -7,8 +7,25 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["clipboard"]
+clipboard = ["dep:arboard"]
+
 [dependencies]
 pi-core = { path = "../pi-core" }
+pi-agent = { path = "../pi-agent" }
+pi-session = { path = "../pi-session" }
+pi-tools = { path = "../pi-tools" }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+unicode-width = { workspace = true }
+walkdir = { workspace = true }
+arboard = { workspace = true, optional = true }
+serde = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,15 +1,53 @@
+//! Agent loop: drives one or more provider turns and reconciles tool calls.
+//!
+//! Differences vs. the MVP and from pi_agent_rust / pi-rs:
+//!
+//! - Streaming is first-class. The agent always uses `provider.stream(...)` and
+//!   adapts `StreamEvent`s into typed `Event`s for the consumer. Non-streaming
+//!   providers fall through automatically because the trait default replays
+//!   captured events through the sink.
+//! - System prompt is composed from a configurable template that captures
+//!   `cwd`, `os`, `arch`, locale, and tool inventory. The template is overridable
+//!   so users can install a custom `system.md` in their `.pi/` directory.
+//! - Cooperative cancellation: an `Arc<AtomicBool>` can be flipped by a UI
+//!   thread to abort an in-flight stream. The `StreamSink` checks it.
+//! - Context compaction is applied before each provider call: when the token
+//!   estimate exceeds the configured fraction of the context window we summarize
+//!   older turns using the same provider.
+//! - Slash commands run before provider routing so they always work, even
+//!   when the provider is unavailable.
+//!
+//! The whole loop is synchronous; that is deliberate. It lets the agent compose
+//! cleanly with CLI batch mode, an embeddable SDK, the RPC/SDK harness, and a
+//! ratatui-driven TUI thread without dragging tokio into every consumer.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use pi_core::{
-    AppConfig, Event, Message, PiError, PiErrorKind, PiResult, Role, StreamEvent, ToolInvocation,
+    estimate_messages_tokens, AppConfig, Event, Message, PermissionModeKind, PiError, PiErrorKind,
+    PiResult, Role, StreamEvent, StreamSink, ToolInvocation, Usage,
 };
 use pi_permissions::{PermissionEngine, PermissionMode};
-use pi_providers::{provider_for, ProviderRequest};
+use pi_providers::{provider_for, Provider, ProviderRequest, ProviderResponse};
 use pi_session::{Session, SessionStore};
 use pi_tools::{ToolCall, ToolRuntime};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub mod compaction;
+pub mod settings;
+pub mod skills;
+pub mod slash;
+pub mod system_prompt;
+pub use compaction::{maybe_compact, CompactionReport};
+pub use settings::PersistedSettings;
+pub use skills::{Skill, SkillSet, SkillTrigger};
+pub use slash::{SlashCommand, SlashOutcome, SlashRegistry};
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentTurn {
     pub session: Session,
     pub events: Vec<Event>,
+    pub usage: Usage,
 }
 
 pub struct AgentRuntime<S: SessionStore> {
@@ -17,15 +55,31 @@ pub struct AgentRuntime<S: SessionStore> {
     session_store: S,
     tools: ToolRuntime,
     permissions: PermissionEngine,
+    cancel: Arc<AtomicBool>,
+    slash: SlashRegistry,
+    skills: SkillSet,
 }
 
 impl<S: SessionStore> AgentRuntime<S> {
     pub fn new(config: AppConfig, session_store: S) -> Self {
+        let mode = permission_mode(&config.permission_mode);
+        let cwd = std::env::current_dir().ok();
+        let skills = cwd
+            .as_deref()
+            .map(SkillSet::load_workspace)
+            .unwrap_or_default();
+        let mut slash = SlashRegistry::builtin();
+        if let Some(cwd) = cwd.as_deref() {
+            slash.load_custom(cwd);
+        }
         Self {
             config,
             session_store,
             tools: ToolRuntime::builtin(),
-            permissions: PermissionEngine::new(PermissionMode::ConfirmMutations),
+            permissions: PermissionEngine::new(mode),
+            cancel: Arc::new(AtomicBool::new(false)),
+            slash,
+            skills,
         }
     }
 
@@ -35,35 +89,108 @@ impl<S: SessionStore> AgentRuntime<S> {
             None => ToolRuntime::builtin(),
         };
 
+        let mode = permission_mode(&config.permission_mode);
+        let cwd = std::env::current_dir().ok();
+        let skills = cwd
+            .as_deref()
+            .map(SkillSet::load_workspace)
+            .unwrap_or_default();
+        let mut slash = SlashRegistry::builtin();
+        if let Some(cwd) = cwd.as_deref() {
+            slash.load_custom(cwd);
+        }
         Ok(Self {
             config,
             session_store,
             tools,
-            permissions: PermissionEngine::new(PermissionMode::ConfirmMutations),
+            permissions: PermissionEngine::new(mode),
+            cancel: Arc::new(AtomicBool::new(false)),
+            slash,
+            skills,
         })
     }
 
+    pub fn config(&self) -> &AppConfig {
+        &self.config
+    }
+
+    pub fn config_mut(&mut self) -> &mut AppConfig {
+        &mut self.config
+    }
+
+    pub fn cancel_handle(&self) -> Arc<AtomicBool> {
+        self.cancel.clone()
+    }
+
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    pub fn reset_cancel(&self) {
+        self.cancel.store(false, Ordering::SeqCst);
+    }
+
     pub fn run_single_turn(&mut self, session_id: &str, prompt: &str) -> PiResult<AgentTurn> {
+        self.run_single_turn_with_attachments(session_id, prompt, Vec::new())
+    }
+
+    pub fn run_single_turn_with_attachments(
+        &mut self,
+        session_id: &str,
+        prompt: &str,
+        attachments: Vec<pi_core::Attachment>,
+    ) -> PiResult<AgentTurn> {
+        self.reset_cancel();
         let mut events = vec![Event::UserMessage(prompt.to_string())];
-        let mut session = self.session_store.load(session_id)?;
-        let user_message = Message::new(Role::User, prompt);
+        let session_existing = self.session_store.load(session_id)?;
+        // Restore session's recorded cwd before the turn so file paths in the
+        // transcript stay valid across `--resume` invocations from a different
+        // shell location. We never error if the directory has moved — that's
+        // expected when projects rename, just warn via status.
+        if let Some(cwd) = session_existing.cwd() {
+            if std::path::Path::new(cwd).exists() {
+                let _ = std::env::set_current_dir(cwd);
+            }
+        }
+        let mut session = session_existing;
+        let mut user_message = Message::new(Role::User, prompt);
+        user_message.attachments = attachments;
         self.session_store.append(session_id, &user_message)?;
         session.push(user_message);
 
+        if let Some(outcome) = self.slash.handle(prompt) {
+            for event in outcome.events {
+                events.push(event);
+            }
+            if let Some(assistant) = outcome.assistant {
+                let message = Message::new(Role::Assistant, assistant.clone());
+                self.session_store.append(session_id, &message)?;
+                session.push(message);
+                events.push(Event::AssistantMessage(assistant));
+            }
+            return Ok(AgentTurn {
+                session,
+                events,
+                usage: Usage::default(),
+            });
+        }
+
         if self.config.tools_enabled {
             if let Some(call) = parse_tool_shortcut(prompt) {
-                events.push(Event::ToolStarted {
-                    name: call.name.clone(),
+                run_tool_inline(
+                    &self.tools,
+                    &mut self.permissions,
+                    call,
+                    session_id,
+                    &mut session,
+                    &mut events,
+                    &self.session_store,
+                )?;
+                return Ok(AgentTurn {
+                    session,
+                    events,
+                    usage: Usage::default(),
                 });
-                let output = self.tools.run(call, &mut self.permissions)?;
-                events.push(Event::ToolFinished {
-                    name: output.name.clone(),
-                    output: output.output.clone(),
-                });
-                let tool_message = Message::new(Role::Tool, output.output);
-                self.session_store.append(session_id, &tool_message)?;
-                session.push(tool_message);
-                return Ok(AgentTurn { session, events });
             }
         }
 
@@ -73,21 +200,67 @@ impl<S: SessionStore> AgentRuntime<S> {
         } else {
             Vec::new()
         };
+        let system_prompt = self.system_prompt();
 
-        for _ in 0..8 {
-            let response = provider.complete(ProviderRequest {
+        let mut total_usage = Usage::default();
+        for _ in 0..self.config.max_tool_steps.max(1) {
+            if self.cancel.load(Ordering::SeqCst) {
+                events.push(Event::Cancelled);
+                return Err(PiError::new(PiErrorKind::Cancelled, "用户取消"));
+            }
+
+            if let Some(report) = maybe_compact(
+                &mut session.messages,
+                &*provider,
+                &self.config,
+                system_prompt.as_deref(),
+            )? {
+                self.session_store.append(
+                    session_id,
+                    &Message::new(
+                        Role::System,
+                        format!(
+                            "[compaction] before={} after={}",
+                            report.before, report.after
+                        ),
+                    ),
+                )?;
+                events.push(Event::Compacted {
+                    before: report.before,
+                    after: report.after,
+                });
+            }
+
+            let request = ProviderRequest {
                 model: self.config.model.clone(),
                 messages: session.messages.clone(),
                 tools: tool_schemas.clone(),
-            })?;
+                system_prompt: system_prompt.clone(),
+                max_output_tokens: None,
+                temperature: None,
+                stream: self.config.stream,
+            };
 
-            append_provider_stream_events(&mut events, &response.stream_events, &response.events);
+            let mut sink = AgentSink {
+                events: &mut events,
+                cancel: self.cancel.clone(),
+            };
+            let response = provider.stream(request, &mut sink)?;
+            total_usage.merge(&response.usage);
+            if response.usage.total_tokens > 0 {
+                events.push(Event::Usage(response.usage.clone()));
+            }
 
             if response.tool_calls.is_empty() {
-                events.push(Event::AssistantMessage(response.message.content.clone()));
-                self.session_store.append(session_id, &response.message)?;
-                session.push(response.message);
-                return Ok(AgentTurn { session, events });
+                let assistant_message = response.message.clone();
+                events.push(Event::AssistantMessage(assistant_message.content.clone()));
+                self.session_store.append(session_id, &assistant_message)?;
+                session.push(assistant_message);
+                return Ok(AgentTurn {
+                    session,
+                    events,
+                    usage: total_usage,
+                });
             }
 
             if !self.config.tools_enabled {
@@ -97,21 +270,45 @@ impl<S: SessionStore> AgentRuntime<S> {
                 ));
             }
 
+            // Persist assistant turn that carried tool calls so the provider
+            // can use it on retry / resume.
+            let assistant_turn = Message::assistant_with_tool_calls(
+                response.message.content.clone(),
+                response.tool_calls.clone(),
+            );
+            self.session_store.append(session_id, &assistant_turn)?;
+            session.push(assistant_turn);
+
             for invocation in response.tool_calls {
+                if self.cancel.load(Ordering::SeqCst) {
+                    events.push(Event::Cancelled);
+                    return Err(PiError::new(PiErrorKind::Cancelled, "用户取消"));
+                }
                 let tool_call_id = invocation.id.clone();
                 let call = tool_call_from_invocation(invocation);
                 events.push(Event::ToolStarted {
                     name: call.name.clone(),
+                    input: call.input.clone(),
                 });
-                let output = self.tools.run(call, &mut self.permissions)?;
+                let output = match self.tools.run(call.clone(), &mut self.permissions) {
+                    Ok(output) => output,
+                    Err(err) => {
+                        events.push(Event::ToolError {
+                            name: call.name.clone(),
+                            error: err.to_string(),
+                        });
+                        let error_message =
+                            Message::tool_result(tool_call_id.clone(), format!("ERROR: {err}"));
+                        self.session_store.append(session_id, &error_message)?;
+                        session.push(error_message);
+                        continue;
+                    }
+                };
                 events.push(Event::ToolFinished {
                     name: output.name.clone(),
                     output: output.output.clone(),
                 });
-                let tool_message = Message::tool_result(
-                    tool_call_id,
-                    format!("{}:\n{}", output.name, output.output),
-                );
+                let tool_message = Message::tool_result(tool_call_id, output.output);
                 self.session_store.append(session_id, &tool_message)?;
                 session.push(tool_message);
             }
@@ -126,32 +323,98 @@ impl<S: SessionStore> AgentRuntime<S> {
     pub fn tool_schemas(&self) -> Vec<pi_core::ToolSchema> {
         self.tools.schemas()
     }
+
+    /// Mutable access to the underlying tool runtime so callers can plug in
+    /// extension or MCP tools after construction.
+    pub fn tools_mut(&mut self) -> &mut ToolRuntime {
+        &mut self.tools
+    }
+
+    pub fn slash_commands(&self) -> Vec<&SlashCommand> {
+        self.slash.list()
+    }
+
+    fn system_prompt(&self) -> Option<String> {
+        let base = self
+            .config
+            .system_prompt
+            .clone()
+            .unwrap_or_else(|| system_prompt::default(&self.config, &self.tools.schemas()));
+        let skills_section = self.skills.always_prompt();
+        if skills_section.is_empty() {
+            Some(base)
+        } else {
+            Some(format!("{base}{skills_section}"))
+        }
+    }
+}
+
+fn permission_mode(kind: &PermissionModeKind) -> PermissionMode {
+    match kind {
+        PermissionModeKind::ReadOnly => PermissionMode::ReadOnly,
+        PermissionModeKind::ConfirmMutations => PermissionMode::ConfirmMutations,
+        PermissionModeKind::TrustedWorkspace => PermissionMode::TrustedWorkspace,
+        PermissionModeKind::Plan => PermissionMode::ReadOnly,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_tool_inline<S: SessionStore>(
+    tools: &ToolRuntime,
+    permissions: &mut PermissionEngine,
+    call: ToolCall,
+    session_id: &str,
+    session: &mut Session,
+    events: &mut Vec<Event>,
+    session_store: &S,
+) -> PiResult<()> {
+    events.push(Event::ToolStarted {
+        name: call.name.clone(),
+        input: call.input.clone(),
+    });
+    let output = tools.run(call.clone(), permissions)?;
+    events.push(Event::ToolFinished {
+        name: output.name.clone(),
+        output: output.output.clone(),
+    });
+    let tool_message = Message::new(Role::Tool, output.output);
+    session_store.append(session_id, &tool_message)?;
+    session.push(tool_message);
+    Ok(())
+}
+
+struct AgentSink<'a> {
+    events: &'a mut Vec<Event>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl<'a> StreamSink for AgentSink<'a> {
+    fn emit(&mut self, event: StreamEvent) -> PiResult<()> {
+        match &event {
+            StreamEvent::TextDelta(delta) => {
+                self.events.push(Event::AssistantDelta(delta.clone()));
+            }
+            StreamEvent::ThinkingDelta(delta) => {
+                self.events.push(Event::ThinkingDelta(delta.clone()));
+            }
+            StreamEvent::UsageDelta(usage) => {
+                self.events.push(Event::Usage(usage.clone()));
+            }
+            _ => {}
+        }
+        self.events.push(Event::ProviderStream(event));
+        Ok(())
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
 }
 
 fn tool_call_from_invocation(invocation: ToolInvocation) -> ToolCall {
     ToolCall {
         name: invocation.name,
         input: invocation.input,
-    }
-}
-
-fn append_provider_stream_events(
-    events: &mut Vec<Event>,
-    stream_events: &[StreamEvent],
-    legacy_deltas: &[String],
-) {
-    if stream_events.is_empty() {
-        for delta in legacy_deltas {
-            events.push(Event::AssistantDelta(delta.clone()));
-        }
-        return;
-    }
-
-    for event in stream_events {
-        events.push(Event::ProviderStream(event.clone()));
-        if let StreamEvent::TextDelta(delta) = event {
-            events.push(Event::AssistantDelta(delta.clone()));
-        }
     }
 }
 
@@ -162,4 +425,53 @@ fn parse_tool_shortcut(prompt: &str) -> Option<ToolCall> {
         name: name.to_string(),
         input: input.to_string(),
     })
+}
+
+/// Estimate the prompt token footprint of the messages we would send.
+pub fn estimate_request_tokens(messages: &[Message]) -> u32 {
+    estimate_messages_tokens(messages)
+}
+
+/// Build a one-off provider request without running the full agent. Useful for
+/// the compaction path and for SDK callers that want to drive their own loop.
+pub fn build_request(
+    config: &AppConfig,
+    messages: Vec<Message>,
+    tools: Vec<pi_core::ToolSchema>,
+    system_prompt: Option<String>,
+) -> ProviderRequest {
+    ProviderRequest {
+        model: config.model.clone(),
+        messages,
+        tools,
+        system_prompt,
+        max_output_tokens: None,
+        temperature: None,
+        stream: config.stream,
+    }
+}
+
+/// Re-export for callers that want to drive provider directly.
+pub fn run_provider(
+    provider: &dyn Provider,
+    request: ProviderRequest,
+) -> PiResult<ProviderResponse> {
+    provider.complete(request)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_tool_shortcut_handles_basic_form() {
+        let call = parse_tool_shortcut("/tool ls .").expect("call");
+        assert_eq!(call.name, "ls");
+        assert_eq!(call.input, ".");
+    }
+
+    #[test]
+    fn parse_tool_shortcut_returns_none_for_plain_prompt() {
+        assert!(parse_tool_shortcut("hello").is_none());
+    }
 }

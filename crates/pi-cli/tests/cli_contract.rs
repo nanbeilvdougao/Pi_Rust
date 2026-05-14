@@ -39,7 +39,7 @@ fn print_mode_returns_local_response() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Pi Rust MVP"));
+    assert!(stdout.contains("Pi Rust"));
     assert!(stdout.contains("你好"));
 }
 

@@ -1,60 +1,296 @@
+//! `pi` command-line entry point.
+//!
+//! Two modes:
+//! - `--print` (or any positional prompt without `--interactive`): one-shot
+//!   batch turn. Streams to stdout when stream is enabled.
+//! - default (no prompt) or `--interactive`: launches the ratatui TUI.
+//!
+//! Beyond what TS pi exposes:
+//! - `--permission` selects the engine mode at startup (read-only/confirm/trusted/plan).
+//! - `--system` overrides the default system prompt.
+//! - `--export-session`, `--rename-session`, `--delete-session` are first-class.
+
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+use clap::{Parser, ValueEnum};
 use pi_agent::AgentRuntime;
-use pi_core::{AppConfig, Event, ModelSelection, PiError, PiErrorKind, PiResult, VERSION};
+
+mod auth;
+mod rpc;
+mod update;
+use pi_core::{
+    AppConfig, Event, Locale, ModelSelection, PermissionModeKind, PiError, PiErrorKind, PiResult,
+    VERSION,
+};
 use pi_providers::ProviderRegistry;
 use pi_session::JsonlSessionStore;
 use pi_tools::ToolRuntime;
 
+#[derive(Parser, Debug)]
+#[command(
+    name = "pi",
+    version = VERSION,
+    about = "Pi Rust — 本地优先的中文 AI 编程助手",
+    long_about = None,
+)]
+struct Cli {
+    /// Prompt text. Provide multiple words separated by spaces. Omit to enter
+    /// interactive TUI mode.
+    #[arg(value_name = "PROMPT")]
+    prompt: Vec<String>,
+
+    /// One-shot batch mode: stream the assistant reply to stdout and exit.
+    #[arg(short = 'p', long = "print")]
+    print: bool,
+
+    /// Continue the default session (`default.jsonl`).
+    #[arg(short = 'c', long = "continue")]
+    continue_default: bool,
+
+    /// Resume a specific session id.
+    #[arg(long = "resume", value_name = "ID")]
+    resume: Option<String>,
+
+    /// Use the named session id for this turn.
+    #[arg(long = "session", value_name = "ID")]
+    session: Option<String>,
+
+    /// Provider id (echo, ollama, openai, moonshot, deepseek, qwen, zhipu,
+    /// minimax, anthropic, gemini).
+    #[arg(long = "provider", default_value = "echo")]
+    provider: String,
+
+    /// Model id within the chosen provider.
+    #[arg(long = "model", default_value = "echo-local")]
+    model: String,
+
+    /// Restrict to a comma-separated subset of tools.
+    #[arg(long = "tools", value_delimiter = ',')]
+    tools: Option<Vec<String>>,
+
+    /// Disable tools entirely.
+    #[arg(long = "no-tools")]
+    no_tools: bool,
+
+    /// Override the default system prompt.
+    #[arg(long = "system")]
+    system: Option<String>,
+
+    /// Permission mode.
+    #[arg(long = "permission", value_enum, default_value_t = PermissionModeArg::Confirm)]
+    permission: PermissionModeArg,
+
+    /// Output locale.
+    #[arg(long = "locale", value_enum, default_value_t = LocaleArg::ZhCn)]
+    locale: LocaleArg,
+
+    /// Stream responses as they arrive.
+    #[arg(long = "stream", default_value_t = true, action = clap::ArgAction::Set)]
+    stream: bool,
+
+    /// Maximum tool-call rounds per turn.
+    #[arg(long = "max-steps", default_value_t = 16)]
+    max_steps: u32,
+
+    /// Force interactive TUI even if a prompt is provided.
+    #[arg(short = 'i', long = "interactive")]
+    interactive: bool,
+
+    /// TUI theme: dark (default) / light / solarized, or path-based override.
+    #[arg(long = "theme")]
+    theme: Option<String>,
+
+    /// Run a JSON-RPC over stdio loop (for SDK/IDE integrations).
+    #[arg(long = "rpc")]
+    rpc: bool,
+
+    /// Run `pi doctor` and exit.
+    #[arg(long = "doctor", action = clap::ArgAction::SetTrue)]
+    doctor: bool,
+
+    /// Send a real liveness probe to each configured provider.
+    #[arg(long = "probe", action = clap::ArgAction::SetTrue)]
+    probe: bool,
+
+    /// Check GitHub Releases for a newer version.
+    #[arg(long = "version-check", action = clap::ArgAction::SetTrue)]
+    version_check: bool,
+
+    /// Self-update by replacing the running binary with the latest release.
+    /// Requires `--yes` to actually proceed.
+    #[arg(long = "self-update", action = clap::ArgAction::SetTrue)]
+    self_update: bool,
+
+    /// Confirmation flag for `--self-update`.
+    #[arg(long = "yes", action = clap::ArgAction::SetTrue)]
+    yes: bool,
+
+    /// Override GitHub repo for release lookups (default: Shellmia0/Pi_Rust).
+    #[arg(long = "release-repo")]
+    release_repo: Option<String>,
+
+    #[arg(long = "list-providers", action = clap::ArgAction::SetTrue)]
+    list_providers: bool,
+    #[arg(long = "list-models", action = clap::ArgAction::SetTrue)]
+    list_models: bool,
+    #[arg(long = "list-aliases", action = clap::ArgAction::SetTrue)]
+    list_aliases: bool,
+    #[arg(long = "list-tools", action = clap::ArgAction::SetTrue)]
+    list_tools: bool,
+    #[arg(long = "list-sessions", action = clap::ArgAction::SetTrue)]
+    list_sessions: bool,
+    #[arg(long = "delete-session", value_name = "ID")]
+    delete_session: Option<String>,
+    #[arg(long = "rename-session", value_names = ["FROM", "TO"], num_args = 2)]
+    rename_session: Option<Vec<String>>,
+    #[arg(long = "export-session", value_name = "ID")]
+    export_session: Option<String>,
+    #[arg(long = "export-json", value_name = "ID")]
+    export_session_json: Option<String>,
+    #[arg(long = "export-html", value_name = "ID")]
+    export_session_html: Option<String>,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum PermissionModeArg {
+    ReadOnly,
+    Confirm,
+    Trusted,
+    Plan,
+}
+
+impl From<PermissionModeArg> for PermissionModeKind {
+    fn from(value: PermissionModeArg) -> Self {
+        match value {
+            PermissionModeArg::ReadOnly => PermissionModeKind::ReadOnly,
+            PermissionModeArg::Confirm => PermissionModeKind::ConfirmMutations,
+            PermissionModeArg::Trusted => PermissionModeKind::TrustedWorkspace,
+            PermissionModeArg::Plan => PermissionModeKind::Plan,
+        }
+    }
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum LocaleArg {
+    ZhCn,
+    En,
+}
+
+impl From<LocaleArg> for Locale {
+    fn from(value: LocaleArg) -> Self {
+        match value {
+            LocaleArg::ZhCn => Locale::ZhCn,
+            LocaleArg::En => Locale::En,
+        }
+    }
+}
+
 fn main() {
-    if let Err(error) = run() {
+    // Pre-clap subcommand routing: `pi auth …`, `pi doctor`, `pi sessions`.
+    if let Some(auth_args) = auth_subcommand() {
+        if let Err(err) = auth::run(&auth_args) {
+            eprintln!("错误：{err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if let Some(legacy) = legacy_subcommand_args() {
+        if let Err(err) = run(legacy) {
+            eprintln!("错误：{err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let args = match parse_args() {
+        Ok(args) => args,
+        Err(err) => {
+            use clap::error::ErrorKind;
+            if matches!(
+                err.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) {
+                err.exit();
+            }
+            err.exit();
+        }
+    };
+    if let Err(error) = run(args) {
         eprintln!("错误：{error}");
+        let locale = match std::env::var("PI_LOCALE").as_deref() {
+            Ok("en") | Ok("en-US") => pi_core::Locale::En,
+            _ => pi_core::Locale::ZhCn,
+        };
+        let hint = pi_core::hint_for(&error, locale);
+        eprintln!("提示：{}", hint.format());
         std::process::exit(1);
     }
 }
 
-fn run() -> PiResult<()> {
-    let parsed = ParsedArgs::parse(env::args().skip(1))?;
-
-    if parsed.help {
-        print_help();
-        return Ok(());
+fn legacy_subcommand_args() -> Option<Cli> {
+    let argv: Vec<String> = env::args().collect();
+    if argv.len() < 2 {
+        return None;
     }
-
-    if parsed.doctor {
-        print_doctor()?;
-        return Ok(());
+    match argv[1].as_str() {
+        "doctor" if argv.len() == 2 => Cli::try_parse_from(["pi", "--doctor"]).ok(),
+        "sessions" if argv.len() == 2 => Cli::try_parse_from(["pi", "--list-sessions"]).ok(),
+        _ => None,
     }
+}
 
-    if parsed.version {
-        println!("{VERSION}");
-        return Ok(());
+fn auth_subcommand() -> Option<Vec<String>> {
+    let argv: Vec<String> = env::args().collect();
+    if argv.len() >= 2 && argv[1] == "auth" {
+        Some(argv[2..].to_vec())
+    } else {
+        None
     }
+}
 
-    if parsed.list_providers {
+fn parse_args() -> Result<Cli, clap::Error> {
+    Cli::try_parse()
+}
+
+fn run(cli: Cli) -> PiResult<()> {
+    if cli.doctor {
+        return print_doctor(cli.probe);
+    }
+    if cli.probe {
+        return print_probe();
+    }
+    if cli.version_check {
+        return update::version_check(cli.release_repo.as_deref());
+    }
+    if cli.self_update {
+        return update::self_update(cli.release_repo.as_deref(), cli.yes);
+    }
+    if cli.list_providers {
         print_providers();
         return Ok(());
     }
-
-    if parsed.list_models {
+    if cli.list_models {
         print_models();
         return Ok(());
     }
-
-    if parsed.list_tools {
+    if cli.list_aliases {
+        print_aliases();
+        return Ok(());
+    }
+    if cli.list_tools {
         print_tools();
         return Ok(());
     }
 
     let session_root = default_session_root()?;
-    if parsed.list_sessions {
-        print_sessions(&JsonlSessionStore::new(session_root))?;
-        return Ok(());
-    }
     let store = JsonlSessionStore::new(session_root);
-    if let Some(id) = parsed.delete_session {
+
+    if cli.list_sessions {
+        return print_sessions(&store);
+    }
+    if let Some(id) = cli.delete_session {
         let deleted = store.delete(&id)?;
         println!(
             "{}",
@@ -66,169 +302,176 @@ fn run() -> PiResult<()> {
         );
         return Ok(());
     }
-    if let Some((from, to)) = parsed.rename_session {
-        store.rename(&from, &to)?;
-        println!("已重命名会话：{from} -> {to}");
+    if let Some(pair) = cli.rename_session {
+        if pair.len() != 2 {
+            return Err(PiError::new(
+                PiErrorKind::InvalidInput,
+                "--rename-session 需要 <FROM> <TO>",
+            ));
+        }
+        store.rename(&pair[0], &pair[1])?;
+        println!("已重命名会话：{} -> {}", pair[0], pair[1]);
         return Ok(());
     }
-    if let Some(id) = parsed.export_session {
+    if let Some(id) = cli.export_session {
         println!("{}", store.export_markdown(&id)?);
         return Ok(());
     }
+    if let Some(id) = cli.export_session_json {
+        println!("{}", store.export_json(&id)?);
+        return Ok(());
+    }
+    if let Some(id) = cli.export_session_html {
+        println!("{}", store.export_html(&id)?);
+        return Ok(());
+    }
 
-    let prompt = parsed.prompt.ok_or_else(|| {
-        PiError::new(
-            PiErrorKind::InvalidInput,
-            "缺少提示词。运行 `pi --help` 查看用法。",
-        )
-    })?;
+    let session_id = cli
+        .session
+        .clone()
+        .or_else(|| cli.resume.clone())
+        .or_else(|| {
+            if cli.continue_default {
+                Some("default".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "default".to_string());
 
-    let config = AppConfig {
-        model: ModelSelection {
-            provider: parsed.provider,
-            model: parsed.model,
-        },
-        session_path: parsed.session_id.clone(),
-        print_mode: parsed.print_mode,
-        tools_enabled: parsed.tools_enabled,
-        enabled_tool_names: parsed.enabled_tool_names.clone(),
-        ..AppConfig::default()
-    };
+    let prompt = cli.prompt.join(" ");
+    let interactive = cli.interactive || (prompt.trim().is_empty() && !cli.print);
+
+    let mut config = AppConfig::default();
+    // Layered settings: user → workspace. CLI flags override below.
+    let workspace_root = env::current_dir().ok();
+    let settings = pi_agent::PersistedSettings::load_layered(workspace_root.as_deref());
+    settings.apply_to(&mut config);
+
+    let cli_locale: pi_core::Locale = cli.locale.clone().into();
+    let cli_permission: pi_core::PermissionModeKind = cli.permission.clone().into();
+    let cli_provided_provider = cli.provider != "echo" || settings.provider.is_none();
+    let cli_provided_model = cli.model != "echo-local" || settings.model.is_none();
+    let provider_is_default = cli.provider == "echo" && !cli_provided_provider;
+    // If the user only set --model and the value looks like an alias, resolve
+    // both provider and model from the alias table. Explicit --provider always
+    // wins over alias resolution.
+    if cli_provided_model && (provider_is_default || cli.provider == "echo") {
+        if let Ok(resolved) = pi_providers::resolve_alias(&cli.model) {
+            if resolved.via_alias {
+                config.model = resolved.model;
+                if cli_provided_provider
+                    && cli.provider != config.model.provider
+                    && cli.provider != "echo"
+                {
+                    // user passed both --provider and an alias that contradicts
+                    // it; keep --provider.
+                    config.model.provider = cli.provider.clone();
+                }
+            } else {
+                config.model.model = cli.model.clone();
+                if cli_provided_provider {
+                    config.model.provider = cli.provider.clone();
+                }
+            }
+        } else {
+            config.model.model = cli.model.clone();
+            if cli_provided_provider {
+                config.model.provider = cli.provider.clone();
+            }
+        }
+    } else {
+        if cli_provided_provider {
+            config.model.provider = cli.provider.clone();
+        }
+        if cli_provided_model {
+            config.model.model = cli.model.clone();
+        }
+    }
+    config.session_path = Some(session_id.clone());
+    config.print_mode = cli.print;
+    if cli.no_tools {
+        config.tools_enabled = false;
+    }
+    if cli.tools.is_some() {
+        config.enabled_tool_names = cli.tools.clone();
+    }
+    if cli.system.is_some() {
+        config.system_prompt = cli.system.clone();
+    }
+    config.locale = cli_locale;
+    config.permission_mode = cli_permission;
+    config.stream = cli.stream;
+    if cli.max_steps != 16 {
+        config.max_tool_steps = cli.max_steps;
+    }
+    let _ = ModelSelection::default();
 
     ProviderRegistry::builtin().require(&config.model.provider)?;
-    let session_id = parsed.session_id.unwrap_or_else(|| "default".to_string());
-    let mut agent = AgentRuntime::try_new(config, store)?;
-    let turn = agent.run_single_turn(&session_id, &prompt)?;
 
-    for event in turn.events {
-        match event {
-            Event::AssistantDelta(delta) if parsed.print_mode => print!("{delta}"),
-            Event::AssistantMessage(message) if !parsed.print_mode => println!("{message}"),
-            Event::ToolFinished { output, .. } => println!("{output}"),
-            _ => {}
+    let mut agent = AgentRuntime::try_new(config.clone(), store)?;
+
+    // Wire MCP servers configured in `.pi/mcp.toml` into the agent's tool runtime.
+    if let Some(root) = env::current_dir().ok() {
+        if let Ok(mcp_manager) = pi_mcp::McpManager::load_workspace(&root) {
+            if !mcp_manager.server_ids().is_empty() {
+                mcp_manager.register_into(agent.tools_mut());
+                // Manager kept alive in a static for the process lifetime so
+                // child processes do not get killed mid-conversation.
+                let leaked: &'static pi_mcp::McpManager = Box::leak(Box::new(mcp_manager));
+                let _ = leaked;
+            }
         }
     }
 
-    if parsed.print_mode {
+    if cli.rpc {
+        return rpc::run_stdio(&mut agent);
+    }
+
+    if interactive {
+        return pi_tui::run_interactive_with_theme(agent, session_id, cli.theme.clone());
+    }
+
+    // Disable stream for plain --print so the agent runs the synthetic
+    // single-shot path and emits AssistantMessage instead of a flood of
+    // deltas. Streaming stays on by default for the interactive TUI.
+    if cli.print {
+        config.stream = false;
+    }
+
+    let turn = agent.run_single_turn(&session_id, &prompt)?;
+
+    let mut last_was_delta = false;
+    for event in turn.events {
+        match event {
+            Event::AssistantDelta(delta) if cli.print => {
+                use std::io::Write;
+                print!("{delta}");
+                std::io::stdout().flush().ok();
+                last_was_delta = true;
+            }
+            Event::AssistantMessage(message) if !cli.print => println!("{message}"),
+            Event::ToolFinished { name, output } => {
+                println!("[tool:{name}]\n{output}");
+            }
+            Event::ToolStarted { .. } => {}
+            Event::Usage(usage) if !cli.print => {
+                eprintln!(
+                    "[usage] in={} out={} total={} cache_read={}",
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    usage.total_tokens,
+                    usage.cache_read_tokens
+                );
+            }
+            _ => {}
+        }
+    }
+    if cli.print && last_was_delta {
         println!();
     }
 
     Ok(())
-}
-
-#[derive(Debug, Clone)]
-struct ParsedArgs {
-    help: bool,
-    doctor: bool,
-    version: bool,
-    list_providers: bool,
-    list_models: bool,
-    list_tools: bool,
-    list_sessions: bool,
-    delete_session: Option<String>,
-    rename_session: Option<(String, String)>,
-    export_session: Option<String>,
-    print_mode: bool,
-    tools_enabled: bool,
-    enabled_tool_names: Option<Vec<String>>,
-    provider: String,
-    model: String,
-    session_id: Option<String>,
-    prompt: Option<String>,
-}
-
-impl ParsedArgs {
-    fn parse(args: impl IntoIterator<Item = String>) -> PiResult<Self> {
-        let mut parsed = Self {
-            help: false,
-            doctor: false,
-            version: false,
-            list_providers: false,
-            list_models: false,
-            list_tools: false,
-            list_sessions: false,
-            delete_session: None,
-            rename_session: None,
-            export_session: None,
-            print_mode: false,
-            tools_enabled: true,
-            enabled_tool_names: None,
-            provider: "echo".to_string(),
-            model: "echo-local".to_string(),
-            session_id: None,
-            prompt: None,
-        };
-
-        let mut iter = args.into_iter();
-        while let Some(arg) = iter.next() {
-            match arg.as_str() {
-                "-h" | "--help" => parsed.help = true,
-                "doctor" if parsed.prompt.is_none() => parsed.doctor = true,
-                "sessions" if parsed.prompt.is_none() => parsed.list_sessions = true,
-                "-V" | "--version" => parsed.version = true,
-                "--list-providers" => parsed.list_providers = true,
-                "--list-models" => parsed.list_models = true,
-                "--list-tools" => parsed.list_tools = true,
-                "--list-sessions" => parsed.list_sessions = true,
-                "--delete-session" => {
-                    parsed.delete_session = Some(next_value(&mut iter, "--delete-session")?);
-                }
-                "--rename-session" => {
-                    let from = next_value(&mut iter, "--rename-session <FROM> <TO>")?;
-                    let to = next_value(&mut iter, "--rename-session <FROM> <TO>")?;
-                    parsed.rename_session = Some((from, to));
-                }
-                "--export-session" => {
-                    parsed.export_session = Some(next_value(&mut iter, "--export-session")?);
-                }
-                "-p" | "--print" => parsed.print_mode = true,
-                "--no-tools" => parsed.tools_enabled = false,
-                "--tools" => {
-                    let value = next_value(&mut iter, "--tools")?;
-                    parsed.enabled_tool_names = Some(parse_csv(&value));
-                }
-                "--continue" | "-c" => parsed.session_id = Some("default".to_string()),
-                "--resume" => parsed.session_id = Some(next_value(&mut iter, "--resume")?),
-                "--provider" => parsed.provider = next_value(&mut iter, "--provider")?,
-                "--model" => parsed.model = next_value(&mut iter, "--model")?,
-                "--session" => parsed.session_id = Some(next_value(&mut iter, "--session")?),
-                other if other.starts_with('-') => {
-                    return Err(PiError::new(
-                        PiErrorKind::InvalidInput,
-                        format!("未知参数：{other}"),
-                    ));
-                }
-                value => {
-                    let mut prompt = parsed.prompt.take().unwrap_or_default();
-                    if !prompt.is_empty() {
-                        prompt.push(' ');
-                    }
-                    prompt.push_str(value);
-                    parsed.prompt = Some(prompt);
-                }
-            }
-        }
-
-        Ok(parsed)
-    }
-}
-
-fn next_value(iter: &mut impl Iterator<Item = String>, flag: &str) -> PiResult<String> {
-    iter.next().ok_or_else(|| {
-        PiError::new(
-            PiErrorKind::InvalidInput,
-            format!("参数 {flag} 需要一个值"),
-        )
-    })
-}
-
-fn parse_csv(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(ToString::to_string)
-        .collect()
 }
 
 fn default_session_root() -> PiResult<PathBuf> {
@@ -239,12 +482,6 @@ fn default_session_root() -> PiResult<PathBuf> {
         )
     })?;
     Ok(PathBuf::from(home).join(".pi-rust").join("sessions"))
-}
-
-fn print_help() {
-    println!(
-        "Pi Rust\n\n用法:\n  pi [OPTIONS] <MESSAGE>\n  pi doctor\n  pi sessions\n\n选项:\n  -p, --print              单次输出模式\n  -c, --continue           继续默认会话\n      --session <ID>       使用指定会话 ID\n      --resume <ID>        恢复指定会话 ID\n      --delete-session <ID> 删除本机会话\n      --rename-session <FROM> <TO> 重命名本机会话\n      --export-session <ID> 以 Markdown 导出会话\n      --provider <NAME>    设置 provider，默认 echo\n      --model <MODEL>      设置模型，默认 echo-local\n      --tools <LIST>       启用指定工具，逗号分隔\n      --list-providers     列出内置 provider\n      --list-models        列出内置模型预设\n      --list-tools         列出内置工具 schema\n      --list-sessions      列出本机会话\n      --no-tools           禁用内置工具\n  -h, --help               显示帮助\n  -V, --version            显示版本\n\n工具快捷方式:\n  /tool read README.md\n  /tool ls ."
-    );
 }
 
 fn print_providers() {
@@ -274,13 +511,32 @@ fn print_models() {
     }
 }
 
+fn print_aliases() {
+    println!("alias\tprovider\tmodel");
+    for (alias, provider, model) in pi_providers::aliases::aliases_table() {
+        println!("{alias}\t{provider}\t{model}");
+    }
+    println!();
+    println!("用法：pi --model sonnet 等价于 --provider anthropic --model claude-sonnet-4-6");
+}
+
 fn print_tools() {
     for schema in ToolRuntime::builtin().schemas() {
-        let mutation = if schema.mutates { "mutates" } else { "read-only" };
+        let mutation = if schema.mutates {
+            "mutates"
+        } else {
+            "read-only"
+        };
         println!(
             "{}\t{}\t{}\t{}",
             schema.name, mutation, schema.input_shape, schema.description
         );
+        if let Some(parameters) = &schema.parameters {
+            println!(
+                "\tparameters: {}",
+                serde_json::to_string(parameters).unwrap_or_default()
+            );
+        }
     }
 }
 
@@ -292,15 +548,16 @@ fn print_sessions(store: &JsonlSessionStore) -> PiResult<()> {
     }
 
     for session in sessions {
+        let excerpt = session.last_user_excerpt.as_deref().unwrap_or("");
         println!(
-            "{}\tmessages: {}\tupdated_ms: {}",
-            session.id, session.message_count, session.updated_ms
+            "{}\tmessages: {}\tupdated_ms: {}\t{}",
+            session.id, session.message_count, session.updated_ms, excerpt
         );
     }
     Ok(())
 }
 
-fn print_doctor() -> PiResult<()> {
+fn print_doctor(also_probe: bool) -> PiResult<()> {
     println!("Pi Rust doctor");
     print_command_status("cargo");
     print_command_status("rustc");
@@ -321,6 +578,28 @@ fn print_doctor() -> PiResult<()> {
         }
     }
 
+    println!("rust_version\t{}", env!("CARGO_PKG_RUST_VERSION"));
+    println!("pi_version\t{VERSION}");
+
+    if also_probe {
+        println!();
+        print_probe()?;
+    }
+    Ok(())
+}
+
+fn print_probe() -> PiResult<()> {
+    println!("Provider liveness probe (--probe):");
+    for report in pi_providers::probe_all() {
+        let label = match report.outcome {
+            pi_providers::ProbeOutcome::Ok => "ok".to_string(),
+            pi_providers::ProbeOutcome::AuthFailed(reason) => format!("auth_fail({reason})"),
+            pi_providers::ProbeOutcome::Unreachable(reason) => format!("unreachable({reason})"),
+            pi_providers::ProbeOutcome::MissingCredential => "missing_credential".to_string(),
+            pi_providers::ProbeOutcome::Unsupported => "unsupported".to_string(),
+        };
+        println!("probe\t{}\t{}", report.provider, label);
+    }
     Ok(())
 }
 
@@ -331,5 +610,8 @@ fn print_command_status(command: &str) {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false);
-    println!("command\t{command}\t{}", if status { "found" } else { "missing" });
+    println!(
+        "command\t{command}\t{}",
+        if status { "found" } else { "missing" }
+    );
 }

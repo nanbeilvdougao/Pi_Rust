@@ -1,0 +1,18 @@
+Benchmarking truncate_pi_rust/head_1000
+Benchmarking truncate_pi_rust/head_1000: Warming up for 1.0000 s
+Benchmarking truncate_pi_rust/head_1000: Collecting 30 samples in estimated 2.0007 s (444k iterations)
+Benchmarking truncate_pi_rust/head_1000: Analyzing
+                        time:   [4.4297 µs 4.4655 µs 4.5047 µs]
+Benchmarking truncate_pi_rust/head_10000
+Benchmarking truncate_pi_rust/head_10000: Warming up for 1.0000 s
+Benchmarking truncate_pi_rust/head_10000: Collecting 30 samples in estimated 2.0086 s (97k iterations)
+Benchmarking truncate_pi_rust/head_10000: Analyzing
+                        time:   [20.646 µs 20.788 µs 20.928 µs]
+Benchmarking truncate_pi_rust/head_100000
+Benchmarking truncate_pi_rust/head_100000: Warming up for 1.0000 s
+Benchmarking truncate_pi_rust/head_100000: Collecting 30 samples in estimated 2.0312 s (24k iterations)
+Benchmarking truncate_pi_rust/head_100000: Analyzing
+                        time:   [83.012 µs 83.724 µs 84.643 µs]
+                        time:   [345.46 ns 348.16 ns 351.90 ns]
+                        time:   [3.0401 µs 3.0686 µs 3.0950 µs]
+                        time:   [30.334 µs 30.752 µs 31.096 µs]

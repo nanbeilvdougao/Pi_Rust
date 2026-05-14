@@ -2,50 +2,66 @@
 
 Pi Rust 是一个从零设计的 Rust 版 Pi 终端 AI 编程助手。
 
-本项目不以复刻现有 Rust 移植为目标，而是以更清晰的架构、更可信的兼容证据、更好的中文体验和更低维护成本为目标。
+目标：与 TypeScript 版 Pi 功能对齐，并在性能、可扩展性、设计哲学上超越已有的 Rust 移植（`pi_agent_rust`、`pi-rs`）。
 
-## 目标
+## 已实现亮点
 
-- 与 TypeScript 版 Pi 的核心 CLI、工具、会话和 provider 行为保持可验证兼容。
-- 默认采用能力权限模型，文件写入、命令执行、网络和扩展 hostcall 都必须经过策略决策。
-- 优先支持中文用户场景，包括中文错误提示、国内模型提供商、Ollama、本地/离线安装和 openEuler/epkg 能力。
-- 用契约测试、差异账本和可复现 benchmark 证明质量，而不是依赖口头性能声明。
+- **十个内置 provider**：echo、ollama、openai、moonshot、deepseek、qwen、zhipu、minimax、anthropic、gemini，全部支持流式与工具调用。
+- **真实 SSE 流**：OpenAI 兼容协议、Anthropic Messages、Gemini SSE、Ollama NDJSON 全部走真实流式管道，统一为 `StreamEvent`。
+- **能力权限引擎**：四种权限模式（`read-only` / `confirm` / `trusted` / `plan`）+ 审计日志 + 沙箱根目录 + 危险目标黑名单。
+- **上下文压缩**：估算 token 超过窗口阈值时自动摘要中段消息，保留首尾对话与系统提示。
+- **可扩展运行时**：基于子进程 + JSON-RPC 的 `pi-ext` 扩展宿主，能力声明 + 引擎双重把关。
+- **真实 TUI**：ratatui + crossterm，流式渲染、`Ctrl+C` 协同取消、命令历史、token 用量条。
+- **工具集对齐 TS 版**：read（行号/偏移/限制）、write（自动建目录）、edit（唯一匹配 + diff 预览）、bash（cwd / 超时）、grep（正则）、find（glob）、ls、epkg。
 
-## Workspace
+## 工程目录
 
-- `crates/pi-core`：核心类型、事件、错误和配置模型。
-- `crates/pi-agent`：Agent loop、工具调用、provider 调度和上下文压缩边界。
-- `crates/pi-providers`：LLM provider 抽象和内置 provider 注册表。
-- `crates/pi-tools`：内置工具系统。
-- `crates/pi-permissions`：能力、审批、审计和沙箱策略。
-- `crates/pi-session`：JSONL 会话存储和后续索引边界。
-- `crates/pi-tui`：TUI 事件和渲染边界。
-- `crates/pi-ext`：扩展 ABI、hostcall 和 conformance 边界。
-- `crates/pi-cli`：最终 `pi` 命令入口。
+- `crates/pi-core`：核心类型、消息、流式事件、Usage、权限枚举。
+- `crates/pi-agent`：Agent 循环、工具调度、流式 sink、上下文压缩、slash 命令、系统提示构造。
+- `crates/pi-providers`：Provider trait + 内置 provider 实现，按 provider 拆分到子模块。
+- `crates/pi-tools`：内置工具、JSON schema、diff 预览、glob/regex 搜索。
+- `crates/pi-permissions`：能力 + 审计 + 沙箱 + 危险命令黑名单。
+- `crates/pi-session`：JSONL 会话存储，serde-derived，向后兼容旧手写格式。
+- `crates/pi-tui`：ratatui+crossterm 的交互式终端 UI。
+- `crates/pi-ext`：扩展 ABI v1 + 子进程 JSON-RPC 宿主。
+- `crates/pi-cli`：`pi` 命令行入口，clap 解析。
+- `crates/pi-bench`：criterion 基准。
 
-## 当前状态
-
-这是 MVP 骨架，已经包含基础 CLI、echo provider、JSONL 会话、权限引擎、内置文件工具和扩展 ABI 设计边界。
+## 使用
 
 ```bash
-cargo run -p pi-cli -- --help
-cargo run -p pi-cli -- -p "你好，介绍一下这个项目"
+# 一次性输出
+cargo run -p pi-cli -- -p "你好，介绍下这个项目"
+
+# 进入交互式 TUI（默认 echo provider）
+cargo run -p pi-cli --
+
+# 切换到 Moonshot
+export MOONSHOT_API_KEY=sk-...
+cargo run -p pi-cli -- --provider moonshot --model moonshot-v1-8k
+
+# 列出 provider / 模型 / 工具 / 会话
+cargo run -p pi-cli -- --list-providers
+cargo run -p pi-cli -- --list-models
+cargo run -p pi-cli -- --list-tools
+cargo run -p pi-cli -- --list-sessions
+
+# 健康检查
+cargo run -p pi-cli -- doctor
 ```
 
 ## 质量门禁
-
-每个功能完成后应提交并推送到远端：
-
-```bash
-git add .
-git commit -m "..."
-git push
-```
-
-在发布前必须至少通过：
 
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo bench -p pi-bench --no-run
 ```
+
+## 设计哲学
+
+- **本地、中文优先**：默认中文输出，零网络也可用（echo + ollama）。
+- **能力为先**：所有写文件、执行命令、网络、扩展 hostcall 必须经过策略决策。
+- **证据胜过宣告**：性能数字必须能用 `cargo bench` 复现，对齐情况在 `docs/evidence/parity-ledger.md` 备案。
+- **小核心 + 宽边界**：`pi-core` 不依赖任何本地 crate；产品逻辑住在边界 crate 里，方便剪裁。

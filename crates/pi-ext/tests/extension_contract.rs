@@ -12,6 +12,9 @@ fn hostcalls_map_to_capabilities() {
     let cases = mvp_conformance_cases();
     assert!(cases.len() >= 2);
     for case in cases {
-        assert_eq!(case.hostcall.required_capability(), case.expected_capability);
+        assert_eq!(
+            case.hostcall.required_capability(),
+            case.expected_capability
+        );
     }
 }

@@ -7,9 +7,22 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+wasm = ["dep:wasmtime", "dep:wasi-common", "dep:async-trait"]
+
 [dependencies]
 pi-core = { path = "../pi-core" }
 pi-permissions = { path = "../pi-permissions" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+wasmtime = { workspace = true, optional = true }
+wasi-common = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

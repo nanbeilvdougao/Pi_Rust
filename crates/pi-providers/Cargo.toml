@@ -9,6 +9,10 @@ rust-version.workspace = true
 
 [dependencies]
 pi-core = { path = "../pi-core" }
+pi-auth = { path = "../pi-auth", default-features = false, features = ["encrypted-file"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
 
 [lints]
 workspace = true

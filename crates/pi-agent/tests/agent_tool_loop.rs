@@ -6,10 +6,7 @@ use pi_session::{JsonlSessionStore, SessionStore};
 
 #[test]
 fn provider_tool_call_runs_tool_and_returns_to_provider() {
-    let root = std::env::temp_dir().join(format!(
-        "pi-rust-agent-tool-loop-{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("pi-rust-agent-tool-loop-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
 
     let config = AppConfig {
@@ -31,7 +28,7 @@ fn provider_tool_call_runs_tool_and_returns_to_provider() {
     assert!(turn
         .events
         .iter()
-        .any(|event| matches!(event, Event::ToolStarted { name } if name == "ls")));
+        .any(|event| matches!(event, Event::ToolStarted { name, .. } if name == "ls")));
     assert!(turn
         .events
         .iter()
@@ -46,12 +43,18 @@ fn provider_tool_call_runs_tool_and_returns_to_provider() {
     assert!(saw_final);
 
     let loaded = store.load("contract").expect("load persisted session");
-    assert_eq!(loaded.messages.len(), 3);
+    // Layout after refactor: User -> Assistant(tool_calls) -> Tool -> Assistant(final)
+    // We persist the assistant tool-call turn so the provider can replay the
+    // conversation losslessly on resume; OpenAI/Anthropic both require it.
+    assert_eq!(loaded.messages.len(), 4);
     assert_eq!(loaded.messages[0].role, Role::User);
     assert_eq!(loaded.messages[0].content, "CALL_TOOL ls .");
-    assert_eq!(loaded.messages[1].role, Role::Tool);
-    assert_eq!(loaded.messages[1].tool_call_id.as_deref(), Some("echo-ls"));
-    assert_eq!(loaded.messages[2].role, Role::Assistant);
+    assert_eq!(loaded.messages[1].role, Role::Assistant);
+    assert_eq!(loaded.messages[1].tool_calls.len(), 1);
+    assert_eq!(loaded.messages[1].tool_calls[0].name, "ls");
+    assert_eq!(loaded.messages[2].role, Role::Tool);
+    assert_eq!(loaded.messages[2].tool_call_id.as_deref(), Some("echo-ls"));
+    assert_eq!(loaded.messages[3].role, Role::Assistant);
 
     let _ = fs::remove_dir_all(root);
 }

@@ -1,0 +1,53 @@
+[package]
+name = "pi-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+pi-agent = { path = "../pi-agent" }
+pi-core = { path = "../pi-core" }
+pi-permissions = { path = "../pi-permissions" }
+pi-providers = { path = "../pi-providers" }
+pi-session = { path = "../pi-session" }
+pi-tools = { path = "../pi-tools" }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "session_append"
+harness = false
+
+[[bench]]
+name = "json_serialize"
+harness = false
+
+[[bench]]
+name = "token_estimate"
+harness = false
+
+[[bench]]
+name = "comparable"
+harness = false
+
+[[bench]]
+name = "tool_dispatch"
+harness = false
+
+[[bench]]
+name = "agent_loop"
+harness = false
+
+[[bench]]
+name = "session_save"
+harness = false
+
+[lints]
+workspace = true

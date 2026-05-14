@@ -1,6 +1,23 @@
-use pi_core::{PiError, PiErrorKind, PiResult};
+//! Capability-based permission engine.
+//!
+//! Every tool / extension hostcall declares the capability it needs. The
+//! `PermissionEngine` decides whether to allow the call based on:
+//!
+//! 1. **Mode** — one of `ReadOnly`, `ConfirmMutations`, `TrustedWorkspace`,
+//!    `Plan`. Modes are independent of the sandbox so a workspace can be
+//!    "trusted but read-only" if both are configured that way.
+//! 2. **Sandbox profile** — narrow allowlist of filesystem roots and a
+//!    network toggle. The default profile denies network and accepts any
+//!    file path; production callers will typically set `workspace_root` to
+//!    keep file ops inside the cwd.
+//! 3. **Dangerous target list** — pattern blocklist (e.g. `rm -rf /`).
+//! 4. **Audit log** — every decision is appended; UIs can render this.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use pi_core::{PiError, PiErrorKind, PiResult};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Capability {
     ReadFile,
     WriteFile,
@@ -21,34 +38,49 @@ impl Capability {
             Self::ExtensionHostcall => "extension_hostcall",
         }
     }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        Some(match value {
+            "read_file" => Self::ReadFile,
+            "write_file" => Self::WriteFile,
+            "execute_command" => Self::ExecuteCommand,
+            "network" => Self::Network,
+            "session" => Self::Session,
+            "extension_hostcall" => Self::ExtensionHostcall,
+            _ => return None,
+        })
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionRequest {
     pub capability: Capability,
     pub target: String,
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum PermissionMode {
     ReadOnly,
     ConfirmMutations,
     TrustedWorkspace,
+    Plan,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionDecision {
     pub allowed: bool,
     pub reason: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditEvent {
     pub capability: Capability,
     pub target: String,
     pub allowed: bool,
     pub reason: String,
+    pub timestamp_ms: u128,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +88,7 @@ pub struct PermissionEngine {
     mode: PermissionMode,
     sandbox: SandboxProfile,
     audit: Vec<AuditEvent>,
+    blocklist: Vec<String>,
 }
 
 impl PermissionEngine {
@@ -64,6 +97,7 @@ impl PermissionEngine {
             mode,
             sandbox: SandboxProfile::default(),
             audit: Vec::new(),
+            blocklist: default_blocklist(),
         }
     }
 
@@ -72,21 +106,47 @@ impl PermissionEngine {
         self
     }
 
+    pub fn with_blocklist(mut self, blocklist: Vec<String>) -> Self {
+        self.blocklist = blocklist;
+        self
+    }
+
+    pub fn mode(&self) -> PermissionMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: PermissionMode) {
+        self.mode = mode;
+    }
+
     pub fn decide(&mut self, request: PermissionRequest) -> PermissionDecision {
-        let allowed = self.sandbox.allows(&request)
-            && match self.mode {
+        let sandbox_ok = self.sandbox.allows(&request);
+        let mode_ok = match self.mode {
             PermissionMode::ReadOnly => matches!(
                 request.capability,
                 Capability::ReadFile | Capability::Session
             ),
-            PermissionMode::ConfirmMutations => !is_dangerous_target(&request.target),
+            PermissionMode::ConfirmMutations => {
+                !is_dangerous_target(&self.blocklist, &request.target)
+            }
             PermissionMode::TrustedWorkspace => true,
+            PermissionMode::Plan => matches!(
+                request.capability,
+                Capability::ReadFile | Capability::Session | Capability::ExtensionHostcall
+            ),
         };
+        let allowed = sandbox_ok && mode_ok;
 
         let reason = if allowed {
             "已允许：符合当前权限策略".to_string()
+        } else if !sandbox_ok {
+            "已拒绝：目标超出 sandbox 允许范围".to_string()
         } else {
-            "已拒绝：目标被权限策略拦截".to_string()
+            match self.mode {
+                PermissionMode::ReadOnly => "已拒绝：read-only 模式禁止此能力".to_string(),
+                PermissionMode::Plan => "已拒绝：plan 模式禁止此能力".to_string(),
+                _ => "已拒绝：目标在危险命令黑名单中".to_string(),
+            }
         };
 
         self.audit.push(AuditEvent {
@@ -94,6 +154,7 @@ impl PermissionEngine {
             target: request.target,
             allowed,
             reason: reason.clone(),
+            timestamp_ms: pi_core::now_ms(),
         });
 
         PermissionDecision { allowed, reason }
@@ -123,10 +184,13 @@ impl PermissionEngine {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxProfile {
+    #[serde(default)]
     pub workspace_root: Option<String>,
+    #[serde(default)]
     pub extra_read_roots: Vec<String>,
+    #[serde(default)]
     pub allow_network: bool,
 }
 
@@ -147,7 +211,10 @@ impl SandboxProfile {
         }
 
         if let Some(root) = &self.workspace_root {
-            if matches!(request.capability, Capability::ReadFile | Capability::WriteFile) {
+            if matches!(
+                request.capability,
+                Capability::ReadFile | Capability::WriteFile
+            ) {
                 return request.target.starts_with(root)
                     || self
                         .extra_read_roots
@@ -160,11 +227,86 @@ impl SandboxProfile {
     }
 }
 
-fn is_dangerous_target(target: &str) -> bool {
+fn default_blocklist() -> Vec<String> {
+    vec![
+        "rm -rf /".to_string(),
+        "rm -rf /*".to_string(),
+        "mkfs".to_string(),
+        "shutdown".to_string(),
+        "reboot".to_string(),
+        ":(){:|:&};:".to_string(),
+        "/dev/sda".to_string(),
+        "/dev/zero".to_string(),
+        "dd if=".to_string(),
+    ]
+}
+
+fn is_dangerous_target(blocklist: &[String], target: &str) -> bool {
     let lowered = target.to_ascii_lowercase();
-    lowered.contains("rm -rf /")
-        || lowered.contains("mkfs")
-        || lowered.contains("/dev/")
-        || lowered.contains("shutdown")
-        || lowered.contains("reboot")
+    blocklist
+        .iter()
+        .any(|pattern| lowered.contains(&pattern.to_ascii_lowercase()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirm_mode_blocks_dangerous_targets() {
+        let mut engine = PermissionEngine::new(PermissionMode::ConfirmMutations);
+        let request = PermissionRequest {
+            capability: Capability::ExecuteCommand,
+            target: "rm -rf /".to_string(),
+            reason: "test".to_string(),
+        };
+        let decision = engine.decide(request);
+        assert!(!decision.allowed);
+    }
+
+    #[test]
+    fn read_only_mode_blocks_writes() {
+        let mut engine = PermissionEngine::new(PermissionMode::ReadOnly);
+        let request = PermissionRequest {
+            capability: Capability::WriteFile,
+            target: "/tmp/x".to_string(),
+            reason: "test".to_string(),
+        };
+        let decision = engine.decide(request);
+        assert!(!decision.allowed);
+    }
+
+    #[test]
+    fn plan_mode_blocks_execute() {
+        let mut engine = PermissionEngine::new(PermissionMode::Plan);
+        let request = PermissionRequest {
+            capability: Capability::ExecuteCommand,
+            target: "ls".to_string(),
+            reason: "test".to_string(),
+        };
+        let decision = engine.decide(request);
+        assert!(!decision.allowed);
+    }
+
+    #[test]
+    fn trusted_mode_allows_everything_inside_sandbox() {
+        let mut engine =
+            PermissionEngine::new(PermissionMode::TrustedWorkspace).with_sandbox(SandboxProfile {
+                workspace_root: Some("/workspace".to_string()),
+                extra_read_roots: Vec::new(),
+                allow_network: false,
+            });
+        let outside = engine.decide(PermissionRequest {
+            capability: Capability::WriteFile,
+            target: "/etc/passwd".to_string(),
+            reason: "x".to_string(),
+        });
+        assert!(!outside.allowed);
+        let inside = engine.decide(PermissionRequest {
+            capability: Capability::WriteFile,
+            target: "/workspace/file".to_string(),
+            reason: "x".to_string(),
+        });
+        assert!(inside.allowed);
+    }
 }

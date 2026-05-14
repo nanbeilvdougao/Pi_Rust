@@ -9,6 +9,9 @@ members = [
     "crates/pi-session",
     "crates/pi-tools",
     "crates/pi-tui",
+    "crates/pi-auth",
+    "crates/pi-bench",
+    "crates/pi-mcp",
 ]
 resolver = "2"
 
@@ -27,3 +30,45 @@ unsafe_code = "forbid"
 panic = "warn"
 unwrap_used = "warn"
 expect_used = "warn"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["json", "tls", "gzip"] }
+crossbeam-channel = "0.5"
+ratatui = "0.29"
+crossterm = "0.28"
+unicode-width = "0.2"
+unicode-segmentation = "1"
+sha2 = "0.10"
+dirs = "5"
+walkdir = "2"
+regex = "1"
+globset = "0.4"
+similar = "2"
+toml = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+criterion = "0.5"
+parking_lot = "0.12"
+once_cell = "1"
+fs2 = "0.4"
+tempfile = "3"
+url = "2"
+rusqlite = { version = "0.31", features = ["bundled"] }
+arboard = { version = "3", default-features = false, features = ["image-data"] }
+chacha20poly1305 = { version = "0.10" }
+rpassword = "7"
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service"] }
+wasmtime = "23"
+wasmtime-wasi = "23"
+wasi-common = "23"
+async-trait = "0.1"
+fs-set-times = "0.20"
+system-interface = "0.27"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
