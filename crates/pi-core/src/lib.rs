@@ -3,9 +3,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+pub mod auth_guidance;
 pub mod error_hints;
 pub mod telemetry;
 pub mod timings;
+pub use auth_guidance::{for_provider as auth_guidance_for, AuthGuidance};
 pub use error_hints::{hint_for, ErrorHint};
 pub use telemetry::{flush as flush_telemetry, record as record_telemetry, TelemetryEvent};
 

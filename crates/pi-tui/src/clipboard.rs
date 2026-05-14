@@ -27,8 +27,13 @@ pub fn read_clipboard() -> Pasted {
         return Pasted::Empty;
     };
     if let Ok(image) = clipboard.get_image() {
-        let rgba = image.bytes.into_owned();
-        if let Some(png) = encode_png(image.width as u32, image.height as u32, &rgba) {
+        let (width, height, rgba) = scale_to_max(
+            image.width as u32,
+            image.height as u32,
+            image.bytes.into_owned(),
+            MAX_DIM,
+        );
+        if let Some(png) = encode_png(width, height, &rgba) {
             return Pasted::Image(Attachment {
                 mime_type: "image/png".to_string(),
                 kind: AttachmentKind::Image,
@@ -44,6 +49,38 @@ pub fn read_clipboard() -> Pasted {
         }
     }
     Pasted::Empty
+}
+
+/// Max long side for clipboard images before we downscale. Matches TS pi's
+/// 1568 px choice (the largest Anthropic recommends).
+const MAX_DIM: u32 = 1568;
+
+/// Downscale RGBA via nearest-neighbor if either dimension exceeds `max`.
+/// arboard returns clipboard images as already-decoded RGBA; EXIF orientation
+/// is baked in upstream so we don't need a separate rotation pass.
+pub fn scale_to_max(width: u32, height: u32, rgba: Vec<u8>, max: u32) -> (u32, u32, Vec<u8>) {
+    if width <= max && height <= max {
+        return (width, height, rgba);
+    }
+    let scale = (max as f32 / width.max(height) as f32).min(1.0);
+    let new_w = ((width as f32 * scale) as u32).max(1);
+    let new_h = ((height as f32 * scale) as u32).max(1);
+    let mut out: Vec<u8> = Vec::with_capacity((new_w * new_h * 4) as usize);
+    let xratio = width as f32 / new_w as f32;
+    let yratio = height as f32 / new_h as f32;
+    for y in 0..new_h {
+        let src_y = (y as f32 * yratio) as u32;
+        for x in 0..new_w {
+            let src_x = (x as f32 * xratio) as u32;
+            let idx = ((src_y * width + src_x) * 4) as usize;
+            if idx + 4 <= rgba.len() {
+                out.extend_from_slice(&rgba[idx..idx + 4]);
+            } else {
+                out.extend_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+    }
+    (new_w, new_h, out)
 }
 
 #[cfg(not(feature = "clipboard"))]
@@ -194,5 +231,23 @@ mod tests {
     #[test]
     fn adler32_matches_known_value() {
         assert_eq!(adler32(b"Wikipedia"), 0x11E60398);
+    }
+
+    #[test]
+    fn scale_to_max_passes_small_images_through() {
+        let rgba = vec![1u8; 4 * 4 * 4];
+        let (w, h, out) = scale_to_max(4, 4, rgba.clone(), 1024);
+        assert_eq!((w, h), (4, 4));
+        assert_eq!(out.len(), rgba.len());
+    }
+
+    #[test]
+    fn scale_to_max_downsamples_to_long_side() {
+        let w = 4000;
+        let h = 2000;
+        let rgba = vec![255u8; (w * h * 4) as usize];
+        let (nw, nh, out) = scale_to_max(w, h, rgba, 1568);
+        assert!(nw.max(nh) <= 1568);
+        assert_eq!(out.len() as u32, nw * nh * 4);
     }
 }

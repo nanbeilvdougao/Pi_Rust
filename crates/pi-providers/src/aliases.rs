@@ -21,7 +21,7 @@
 
 use pi_core::{ModelSelection, PiError, PiErrorKind, PiResult};
 
-use crate::ProviderRegistry;
+use crate::{ProviderInfo, ProviderRegistry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSelection {
@@ -80,6 +80,27 @@ const ALIASES: &[(&str, &str, &str)] = &[
     // Ollama
     ("ollama", "ollama", "qwen2.5:7b"),
     ("local", "ollama", "qwen2.5:7b"),
+    // Azure / Vertex / Copilot / OpenRouter / Mistral / Cloudflare
+    ("azure", "azure", "gpt-4o"),
+    ("azure-gpt4", "azure", "gpt-4.1"),
+    ("vertex", "vertex", "gemini-2.5-flash"),
+    ("vertex-pro", "vertex", "gemini-2.5-pro"),
+    ("copilot", "copilot", "gpt-4o"),
+    ("openrouter", "openrouter", "anthropic/claude-3.5-sonnet"),
+    ("mistral", "mistral", "mistral-large-latest"),
+    ("codestral", "mistral", "codestral-latest"),
+    (
+        "cloudflare",
+        "cloudflare",
+        "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    ),
+    (
+        "cf-llama",
+        "cloudflare",
+        "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    ),
+    ("responses", "openai-responses", "gpt-4.1"),
+    ("o3", "openai-responses", "o3"),
 ];
 
 pub fn resolve_alias(input: &str) -> PiResult<ResolvedSelection> {
@@ -125,7 +146,35 @@ pub fn resolve_alias(input: &str) -> PiResult<ResolvedSelection> {
             alias: None,
         });
     }
-    for provider in registry.list() {
+    // Prefer the canonical first-party providers when multiple expose the
+    // same model id (e.g. `gpt-4o` lives in both `openai` and `azure`).
+    let priority = [
+        "openai",
+        "anthropic",
+        "gemini",
+        "moonshot",
+        "deepseek",
+        "qwen",
+        "zhipu",
+        "minimax",
+        "ollama",
+        "mistral",
+        "openrouter",
+        "openai-responses",
+        "azure",
+        "bedrock",
+        "vertex",
+        "cloudflare",
+        "copilot",
+    ];
+    let mut ordered: Vec<&ProviderInfo> = registry.list().collect();
+    ordered.sort_by_key(|p| {
+        priority
+            .iter()
+            .position(|id| *id == p.id.as_str())
+            .unwrap_or(usize::MAX)
+    });
+    for provider in ordered {
         if provider
             .supported_models
             .iter()

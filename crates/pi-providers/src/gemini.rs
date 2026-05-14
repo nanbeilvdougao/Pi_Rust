@@ -91,68 +91,7 @@ impl Provider for GeminiProvider {
                     return Ok(());
                 }
             };
-            if let Some(candidate) = value
-                .get("candidates")
-                .and_then(|c| c.as_array())
-                .and_then(|c| c.first())
-            {
-                if let Some(parts) = candidate
-                    .get("content")
-                    .and_then(|c| c.get("parts"))
-                    .and_then(|p| p.as_array())
-                {
-                    for part in parts {
-                        if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
-                            if !text.is_empty() {
-                                text_buf.push_str(text);
-                                sink.emit(StreamEvent::TextDelta(text.to_string()))?;
-                            }
-                        }
-                        if let Some(call) = part.get("functionCall") {
-                            let name = call
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let args = call.get("args").cloned().unwrap_or(Value::Null);
-                            let input = args
-                                .get("input")
-                                .and_then(|v| v.as_str())
-                                .map(|v| v.to_string())
-                                .unwrap_or_else(|| {
-                                    serde_json::to_string(&args).unwrap_or_default()
-                                });
-                            sink.emit(StreamEvent::ToolCallDelta {
-                                id: None,
-                                name: Some(name.clone()),
-                                input_delta: input.clone(),
-                            })?;
-                            tool_calls.push(ToolInvocation {
-                                id: None,
-                                name,
-                                input,
-                            });
-                        }
-                    }
-                }
-            }
-            if let Some(metadata) = value.get("usageMetadata") {
-                usage.prompt_tokens = metadata
-                    .get("promptTokenCount")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32;
-                usage.completion_tokens = metadata
-                    .get("candidatesTokenCount")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32;
-                usage.total_tokens = metadata
-                    .get("totalTokenCount")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(usage.prompt_tokens as u64 + usage.completion_tokens as u64)
-                    as u32;
-                sink.emit(StreamEvent::UsageDelta(usage.clone()))?;
-            }
-            Ok(())
+            accumulate_chunk_public(&value, sink, &mut text_buf, &mut tool_calls, &mut usage)
         })?;
         sink.emit(StreamEvent::MessageDone)?;
 
@@ -184,6 +123,83 @@ impl Provider for GeminiProvider {
 
 fn base_url() -> String {
     env::var("GEMINI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE.to_string())
+}
+
+pub fn build_body_public(request: &ProviderRequest) -> Value {
+    build_body(request)
+}
+
+pub fn parse_response_public(value: Value) -> PiResult<ProviderResponse> {
+    parse_response(value)
+}
+
+pub fn accumulate_chunk_public(
+    value: &Value,
+    sink: &mut dyn pi_core::StreamSink,
+    text_buf: &mut String,
+    tool_calls: &mut Vec<ToolInvocation>,
+    usage: &mut Usage,
+) -> PiResult<()> {
+    if let Some(candidate) = value
+        .get("candidates")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first())
+    {
+        if let Some(parts) = candidate
+            .get("content")
+            .and_then(|c| c.get("parts"))
+            .and_then(|p| p.as_array())
+        {
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        text_buf.push_str(text);
+                        sink.emit(StreamEvent::TextDelta(text.to_string()))?;
+                    }
+                }
+                if let Some(call) = part.get("functionCall") {
+                    let name = call
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let args = call.get("args").cloned().unwrap_or(Value::Null);
+                    let input = args
+                        .get("input")
+                        .and_then(|v| v.as_str())
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| serde_json::to_string(&args).unwrap_or_default());
+                    sink.emit(StreamEvent::ToolCallDelta {
+                        id: None,
+                        name: Some(name.clone()),
+                        input_delta: input.clone(),
+                    })?;
+                    tool_calls.push(ToolInvocation {
+                        id: None,
+                        name,
+                        input,
+                    });
+                }
+            }
+        }
+    }
+    if let Some(metadata) = value.get("usageMetadata") {
+        usage.prompt_tokens = metadata
+            .get("promptTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        usage.completion_tokens = metadata
+            .get("candidatesTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        usage.total_tokens = metadata
+            .get("totalTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(usage.prompt_tokens as u64 + usage.completion_tokens as u64)
+            as u32;
+        sink.emit(StreamEvent::UsageDelta(usage.clone()))?;
+    }
+    Ok(())
 }
 
 fn build_body(request: &ProviderRequest) -> Value {

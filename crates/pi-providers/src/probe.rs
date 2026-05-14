@@ -64,6 +64,42 @@ fn probe_one(info: &ProviderInfo) -> ProbeOutcome {
         "gemini" => probe_gemini(),
         // No documented free probe surface for MiniMax yet.
         "minimax" => ProbeOutcome::Unsupported,
+        "openrouter" => {
+            probe_openai_compat("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1/models")
+        }
+        "mistral" => probe_openai_compat("MISTRAL_API_KEY", "https://api.mistral.ai/v1/models"),
+        "azure" => match (
+            env::var("AZURE_OPENAI_ENDPOINT").ok(),
+            env::var("AZURE_OPENAI_API_KEY").ok(),
+        ) {
+            (Some(endpoint), Some(key)) => {
+                let version = env::var("AZURE_OPENAI_API_VERSION")
+                    .unwrap_or_else(|_| "2024-10-21".to_string());
+                let url = format!(
+                    "{}/openai/models?api-version={}",
+                    endpoint.trim_end_matches('/'),
+                    version
+                );
+                let agent = http_agent_with_timeout(Duration::from_secs(5));
+                match agent.get(&url).set("api-key", &key).call() {
+                    Ok(_) => ProbeOutcome::Ok,
+                    Err(ureq::Error::Status(401 | 403, _)) => {
+                        ProbeOutcome::AuthFailed("401/403".into())
+                    }
+                    Err(ureq::Error::Status(s, _)) => {
+                        ProbeOutcome::Unreachable(format!("HTTP {s}"))
+                    }
+                    Err(ureq::Error::Transport(err)) => ProbeOutcome::Unreachable(err.to_string()),
+                }
+            }
+            _ => ProbeOutcome::MissingCredential,
+        },
+        "cloudflare" => ProbeOutcome::Unsupported,
+        "copilot" => ProbeOutcome::Unsupported,
+        "vertex" => ProbeOutcome::Unsupported,
+        "openai-responses" => {
+            probe_openai_compat("OPENAI_API_KEY", "https://api.openai.com/v1/models")
+        }
         _ => ProbeOutcome::Unsupported,
     }
 }

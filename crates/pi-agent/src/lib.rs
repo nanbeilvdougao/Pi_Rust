@@ -34,12 +34,14 @@ use pi_session::{Session, SessionStore};
 use pi_tools::{ToolCall, ToolRuntime};
 
 pub mod compaction;
+pub mod fs_watch;
 pub mod settings;
 pub mod skills;
 pub mod slash;
 pub mod source_info;
 pub mod system_prompt;
 pub use compaction::{maybe_compact, CompactionReport};
+pub use fs_watch::{WatchedState, WorkspaceWatcher};
 pub use settings::PersistedSettings;
 pub use skills::{Skill, SkillSet, SkillTrigger};
 pub use slash::{SlashCommand, SlashOutcome, SlashRegistry};
@@ -60,6 +62,7 @@ pub struct AgentRuntime<S: SessionStore> {
     cancel: Arc<AtomicBool>,
     slash: SlashRegistry,
     skills: SkillSet,
+    watcher: Option<WorkspaceWatcher>,
 }
 
 impl<S: SessionStore> AgentRuntime<S> {
@@ -74,6 +77,7 @@ impl<S: SessionStore> AgentRuntime<S> {
         if let Some(cwd) = cwd.as_deref() {
             slash.load_custom(cwd);
         }
+        let watcher = cwd.as_deref().map(WorkspaceWatcher::start);
         Self {
             config,
             session_store,
@@ -82,6 +86,7 @@ impl<S: SessionStore> AgentRuntime<S> {
             cancel: Arc::new(AtomicBool::new(false)),
             slash,
             skills,
+            watcher,
         }
     }
 
@@ -101,6 +106,7 @@ impl<S: SessionStore> AgentRuntime<S> {
         if let Some(cwd) = cwd.as_deref() {
             slash.load_custom(cwd);
         }
+        let watcher = cwd.as_deref().map(WorkspaceWatcher::start);
         Ok(Self {
             config,
             session_store,
@@ -109,7 +115,17 @@ impl<S: SessionStore> AgentRuntime<S> {
             cancel: Arc::new(AtomicBool::new(false)),
             slash,
             skills,
+            watcher,
         })
+    }
+
+    fn refresh_from_watcher(&mut self) {
+        if let Some(watcher) = &self.watcher {
+            let snapshot = watcher.state();
+            // Swap the most recent disk state in.
+            self.skills = snapshot.skills;
+            self.slash = snapshot.slash;
+        }
     }
 
     pub fn config(&self) -> &AppConfig {
@@ -143,6 +159,7 @@ impl<S: SessionStore> AgentRuntime<S> {
         attachments: Vec<pi_core::Attachment>,
     ) -> PiResult<AgentTurn> {
         self.reset_cancel();
+        self.refresh_from_watcher();
         let mut events = vec![Event::UserMessage(prompt.to_string())];
         let session_existing = self.session_store.load(session_id)?;
         // Restore session's recorded cwd before the turn so file paths in the

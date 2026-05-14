@@ -74,6 +74,16 @@ struct Cli {
     #[arg(long = "tools", value_delimiter = ',')]
     tools: Option<Vec<String>>,
 
+    /// Read additional context from files; each --file appends a fenced
+    /// block before the final positional prompt. May be repeated.
+    #[arg(long = "file", value_name = "PATH")]
+    file: Vec<std::path::PathBuf>,
+
+    /// Read the full first user message from a file (replaces positional
+    /// PROMPT). Mutually exclusive with positional prompt content.
+    #[arg(long = "message-file", value_name = "PATH")]
+    message_file: Option<std::path::PathBuf>,
+
     /// Disable tools entirely.
     #[arg(long = "no-tools")]
     no_tools: bool,
@@ -235,6 +245,38 @@ fn main() {
         };
         let hint = pi_core::hint_for(&error, locale);
         eprintln!("提示：{}", hint.format());
+        if matches!(error.kind, pi_core::PiErrorKind::Provider)
+            && (error.message.contains("401")
+                || error.message.contains("403")
+                || error.message.contains("缺少凭证")
+                || error.message.contains("expired"))
+        {
+            for provider in [
+                "anthropic",
+                "openai-responses",
+                "openai",
+                "azure",
+                "bedrock",
+                "vertex",
+                "copilot",
+                "moonshot",
+                "deepseek",
+                "qwen",
+                "zhipu",
+                "minimax",
+                "gemini",
+                "openrouter",
+                "mistral",
+                "cloudflare",
+            ] {
+                if error.message.contains(provider) {
+                    if let Some(g) = pi_core::auth_guidance_for(provider, locale) {
+                        eprintln!("登录指引：{}", g.format());
+                    }
+                    break;
+                }
+            }
+        }
         pi_core::record_telemetry(
             "run",
             Some(format!("{:?}", error.kind)),
@@ -395,7 +437,37 @@ fn run(cli: Cli) -> PiResult<()> {
         })
         .unwrap_or_else(|| "default".to_string());
 
-    let prompt = cli.prompt.join(" ");
+    let mut prompt = if let Some(path) = &cli.message_file {
+        std::fs::read_to_string(path).map_err(|err| {
+            PiError::new(
+                PiErrorKind::Io,
+                format!("--message-file 读取 {} 失败：{err}", path.display()),
+            )
+        })?
+    } else {
+        cli.prompt.join(" ")
+    };
+    if !cli.file.is_empty() {
+        let mut attachments = String::new();
+        for path in &cli.file {
+            let body = std::fs::read_to_string(path).map_err(|err| {
+                PiError::new(
+                    PiErrorKind::Io,
+                    format!("--file 读取 {} 失败：{err}", path.display()),
+                )
+            })?;
+            attachments.push_str(&format!(
+                "\n\n--- file: {} ---\n{}\n--- end ---",
+                path.display(),
+                body
+            ));
+        }
+        if prompt.trim().is_empty() {
+            prompt = attachments.trim_start().to_string();
+        } else {
+            prompt.push_str(&attachments);
+        }
+    }
     let interactive = cli.interactive || (prompt.trim().is_empty() && !cli.print);
 
     let mut config = AppConfig::default();

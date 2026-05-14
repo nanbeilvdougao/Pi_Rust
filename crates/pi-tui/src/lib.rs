@@ -49,15 +49,18 @@ use ratatui::{
 pub mod clipboard;
 pub mod completion;
 pub mod config_selector;
+pub mod editor;
 pub mod footer;
 pub mod keybindings;
 pub mod session_picker;
+pub mod terminal_image;
 pub mod theme;
 use clipboard::{read_clipboard, Pasted};
 use completion::{Completer, CompletionItem, CompletionKind, TriggerSpan};
 pub use config_selector::{
     needs_wizard as needs_config_wizard, run as run_config_wizard, ProviderChoice, WizardResult,
 };
+pub use editor::{Editor, EditorAction};
 use keybindings::KeyBindings;
 use pi_core::Attachment;
 pub use session_picker::{pick as pick_session, PickResult};

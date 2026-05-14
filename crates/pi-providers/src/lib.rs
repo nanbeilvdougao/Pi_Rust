@@ -27,18 +27,28 @@ use serde_json::{json, Value};
 
 pub mod aliases;
 pub mod anthropic;
+pub mod azure;
 pub mod bedrock;
+pub mod cloudflare;
+pub mod copilot;
 pub mod faux;
 pub mod gemini;
 pub mod ollama;
 pub mod openai;
+pub mod openai_responses;
 pub mod probe;
 pub mod sigv4;
+pub mod vertex;
 
 pub use aliases::{resolve_alias, ResolvedSelection};
+pub use azure::AzureOpenAiProvider;
 pub use bedrock::BedrockProvider;
+pub use cloudflare::CloudflareProvider;
+pub use copilot::CopilotProvider;
 pub use faux::{FauxProvider, FauxTurn};
+pub use openai_responses::OpenAiResponsesProvider;
 pub use probe::{probe_all, ProbeOutcome, ProbeReport};
+pub use vertex::VertexProvider;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderInfo {
@@ -243,6 +253,13 @@ impl ProviderRegistry {
         registry.register(anthropic::anthropic_info());
         registry.register(bedrock::bedrock_info());
         registry.register(gemini::gemini_info());
+        registry.register(azure::azure_openai_info());
+        registry.register(cloudflare::cloudflare_info());
+        registry.register(copilot::copilot_info());
+        registry.register(openai::openrouter_info());
+        registry.register(openai::mistral_info());
+        registry.register(openai_responses::openai_responses_info());
+        registry.register(vertex::vertex_info());
         registry
     }
 
@@ -324,6 +341,13 @@ pub fn provider_for(selection: &ModelSelection) -> PiResult<Box<dyn Provider>> {
         "anthropic" => Ok(Box::new(AnthropicProvider::new())),
         "bedrock" => Ok(Box::new(BedrockProvider::new())),
         "gemini" => Ok(Box::new(GeminiProvider::new())),
+        "azure" => Ok(Box::new(AzureOpenAiProvider::new())),
+        "cloudflare" => Ok(Box::new(CloudflareProvider::new())),
+        "copilot" => Ok(Box::new(CopilotProvider::new())),
+        "openrouter" => Ok(Box::new(OpenAiCompatibleProvider::openrouter())),
+        "mistral" => Ok(Box::new(OpenAiCompatibleProvider::mistral())),
+        "openai-responses" => Ok(Box::new(OpenAiResponsesProvider::new())),
+        "vertex" => Ok(Box::new(VertexProvider::new())),
         other => Err(PiError::new(
             PiErrorKind::Provider,
             format!("provider `{other}` 暂未实现执行路径"),
@@ -721,6 +745,13 @@ mod tests {
             "anthropic",
             "bedrock",
             "gemini",
+            "azure",
+            "cloudflare",
+            "copilot",
+            "openrouter",
+            "mistral",
+            "openai-responses",
+            "vertex",
         ] {
             assert!(registry.get(required).is_some(), "missing: {required}");
         }

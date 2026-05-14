@@ -16,6 +16,9 @@
 use pi_core::{PiError, PiErrorKind, PiResult};
 use serde::{Deserialize, Serialize};
 
+pub mod sandbox;
+pub use sandbox::{apply_sandbox, detect_backend as detect_sandbox_backend, SandboxBackend};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {

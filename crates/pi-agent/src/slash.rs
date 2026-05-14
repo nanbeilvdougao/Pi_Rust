@@ -25,6 +25,7 @@ pub struct SlashOutcome {
     pub assistant: Option<String>,
 }
 
+#[derive(Debug, Clone)]
 pub struct SlashRegistry {
     commands: Vec<SlashCommand>,
     custom: Vec<CustomCommand>,
