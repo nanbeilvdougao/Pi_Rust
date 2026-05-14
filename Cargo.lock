@@ -1967,6 +1967,7 @@ dependencies = [
  "pi-agent",
  "pi-auth",
  "pi-core",
+ "pi-ext",
  "pi-mcp",
  "pi-providers",
  "pi-session",

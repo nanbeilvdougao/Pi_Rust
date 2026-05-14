@@ -15,6 +15,7 @@ path = "src/main.rs"
 pi-agent = { path = "../pi-agent" }
 pi-auth = { path = "../pi-auth", default-features = false, features = ["encrypted-file"] }
 pi-core = { path = "../pi-core" }
+pi-ext = { path = "../pi-ext" }
 pi-mcp = { path = "../pi-mcp" }
 pi-providers = { path = "../pi-providers" }
 pi-session = { path = "../pi-session" }

@@ -157,6 +157,10 @@ struct Cli {
     list_aliases: bool,
     #[arg(long = "list-tools", action = clap::ArgAction::SetTrue)]
     list_tools: bool,
+    #[arg(long = "list-resources", action = clap::ArgAction::SetTrue)]
+    list_resources: bool,
+    #[arg(long = "list-prompts", action = clap::ArgAction::SetTrue)]
+    list_prompts: bool,
     #[arg(long = "list-sessions", action = clap::ArgAction::SetTrue)]
     list_sessions: bool,
     #[arg(long = "delete-session", value_name = "ID")]
@@ -366,6 +370,14 @@ fn run(cli: Cli) -> PiResult<()> {
     }
     if cli.list_tools {
         print_tools();
+        return Ok(());
+    }
+    if cli.list_resources {
+        print_resources()?;
+        return Ok(());
+    }
+    if cli.list_prompts {
+        print_prompts()?;
         return Ok(());
     }
 
@@ -682,6 +694,58 @@ fn print_tools() {
             );
         }
     }
+}
+
+fn print_resources() -> PiResult<()> {
+    // Local resources from .pi/resources/*
+    let cwd = env::current_dir().ok();
+    if let Some(root) = &cwd {
+        for resource in pi_ext::wrapper::ToolBridge::load_workspace_resources(root) {
+            println!(
+                "local\t{}\t{}\t{} bytes",
+                resource.uri,
+                resource.mime_type.unwrap_or_default(),
+                resource.body.len()
+            );
+        }
+    }
+    // MCP-aggregated resources.
+    if let Some(root) = &cwd {
+        if let Ok(manager) = pi_mcp::McpManager::load_workspace(root) {
+            for (server_id, resource) in manager.all_resources() {
+                println!(
+                    "mcp:{}\t{}\t{}\t{}",
+                    server_id,
+                    resource.uri,
+                    resource.mime_type.clone().unwrap_or_default(),
+                    resource.description.clone().unwrap_or_default()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_prompts() -> PiResult<()> {
+    let cwd = env::current_dir().ok();
+    if let Some(root) = &cwd {
+        for prompt in pi_ext::wrapper::ToolBridge::load_workspace_prompts(root) {
+            println!("local\t{}\t{}", prompt.name, prompt.description.unwrap_or_default());
+        }
+    }
+    if let Some(root) = &cwd {
+        if let Ok(manager) = pi_mcp::McpManager::load_workspace(root) {
+            for (server_id, prompt) in manager.all_prompts() {
+                println!(
+                    "mcp:{}\t{}\t{}",
+                    server_id,
+                    prompt.name,
+                    prompt.description.clone().unwrap_or_default()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn print_sessions(store: &JsonlSessionStore) -> PiResult<()> {

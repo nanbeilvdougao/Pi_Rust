@@ -8,6 +8,7 @@ pub fn run(args: &[String]) -> PiResult<()> {
     let mut resolver = layered_resolver()?;
     match args.first().map(String::as_str) {
         Some("login") => return login(&mut resolver, &args[1..]),
+        Some("refresh") => return refresh_provider(&mut resolver, &args[1..]),
         Some("set") => {
             let provider = args
                 .get(1)
@@ -68,10 +69,48 @@ pub fn run(args: &[String]) -> PiResult<()> {
         }
         Some(other) => Err(PiError::new(
             PiErrorKind::InvalidInput,
-            format!("未知 auth 子命令：{other}。可用：set / remove / list"),
+            format!("未知 auth 子命令：{other}。可用：login / refresh / set / remove / list"),
         )),
-        None => Err(missing_arg("用法：pi auth <set|remove|list> …")),
+        None => Err(missing_arg("用法：pi auth <login|refresh|set|remove|list> …")),
     }
+}
+
+fn refresh_provider(resolver: &mut impl Resolver, args: &[String]) -> PiResult<()> {
+    let provider = args
+        .first()
+        .ok_or_else(|| missing_arg("用法：pi auth refresh <provider>"))?;
+    let env_name = env_for_provider(provider).ok_or_else(|| {
+        PiError::new(
+            PiErrorKind::InvalidInput,
+            format!("未知 provider {provider}"),
+        )
+    })?;
+    let refresh_env = format!("{env_name}_REFRESH");
+    let refresh_token = resolver
+        .lookup(provider, &refresh_env)?
+        .ok_or_else(|| {
+            PiError::new(
+                PiErrorKind::NotFound,
+                format!(
+                    "{refresh_env} 不在 auth 存储中。先运行 `pi auth login {provider}` 取得 token。"
+                ),
+            )
+        })?;
+    let config = oauth_config_for(provider)?;
+    let tokens = pi_auth::oauth::refresh(&config, &refresh_token)?;
+    resolver.store(provider, env_name, &tokens.access_token)?;
+    if let Some(new_refresh) = tokens.refresh_token.as_deref() {
+        resolver.store(provider, &refresh_env, new_refresh)?;
+    }
+    if let Some(exp) = tokens.expires_at_unix {
+        let exp_env = format!("{env_name}_EXPIRES_AT");
+        resolver.store(provider, &exp_env, &exp.to_string())?;
+    }
+    println!("已刷新 {provider} 的 access_token");
+    if let Some(secs) = tokens.expires_in {
+        println!("新 token 有效期约 {} 秒", secs);
+    }
+    Ok(())
 }
 
 fn missing_arg(message: &str) -> PiError {
@@ -99,9 +138,16 @@ fn login(resolver: &mut impl Resolver, args: &[String]) -> PiResult<()> {
         let refresh_env = format!("{env_name}_REFRESH");
         resolver.store(provider, &refresh_env, refresh)?;
     }
+    if let Some(exp) = tokens.expires_at_unix {
+        let exp_env = format!("{env_name}_EXPIRES_AT");
+        resolver.store(provider, &exp_env, &exp.to_string())?;
+    }
     println!("已通过 OAuth 登录 {provider} 并保存 token");
     if let Some(secs) = tokens.expires_in {
-        println!("token 有效期约 {} 秒（之后需要 refresh）。", secs);
+        println!(
+            "token 有效期约 {} 秒，过期前用 `pi auth refresh {}` 续期。",
+            secs, provider
+        );
     }
     Ok(())
 }
