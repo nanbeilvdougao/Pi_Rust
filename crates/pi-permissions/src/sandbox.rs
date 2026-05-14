@@ -62,7 +62,16 @@ pub fn detect_backend() -> SandboxBackend {
 /// Wrap `command` (mutating it in place) so the inner program runs inside
 /// the OS sandbox. Returns the picked backend so the caller can log /
 /// telemetry whether real isolation was applied.
+///
+/// When the supplied [`SandboxProfile`] is empty (no `workspace_root`, no
+/// extra read roots, no special network flag) we treat it as "user did not
+/// opt into sandboxing" and skip the wrap. This avoids the default profile
+/// surprise-killing every subprocess on macOS, where `sandbox-exec` denies
+/// by default.
 pub fn apply_sandbox(command: &mut Command, profile: &SandboxProfile) -> SandboxBackend {
+    if profile_is_empty(profile) {
+        return SandboxBackend::None;
+    }
     let backend = detect_backend();
     match backend {
         SandboxBackend::Bwrap => apply_bwrap(command, profile),
@@ -76,6 +85,10 @@ pub fn apply_sandbox(command: &mut Command, profile: &SandboxProfile) -> Sandbox
         SandboxBackend::None => {}
     }
     backend
+}
+
+fn profile_is_empty(profile: &SandboxProfile) -> bool {
+    profile.workspace_root.is_none() && profile.extra_read_roots.is_empty() && !profile.allow_network
 }
 
 fn apply_bwrap(command: &mut Command, profile: &SandboxProfile) {

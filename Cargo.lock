@@ -1969,6 +1969,7 @@ dependencies = [
  "pi-core",
  "pi-ext",
  "pi-mcp",
+ "pi-permissions",
  "pi-providers",
  "pi-session",
  "pi-tools",

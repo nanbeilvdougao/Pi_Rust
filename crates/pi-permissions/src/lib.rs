@@ -143,6 +143,13 @@ impl PermissionEngine {
         self.mode
     }
 
+    /// Borrow the active sandbox profile so callers (most importantly the
+    /// `bash` tool and any tool that spawns a subprocess) can hand it to
+    /// [`apply_sandbox`] without re-deriving it from config.
+    pub fn sandbox(&self) -> &SandboxProfile {
+        &self.sandbox
+    }
+
     pub fn set_mode(&mut self, mode: PermissionMode) {
         self.mode = mode;
     }

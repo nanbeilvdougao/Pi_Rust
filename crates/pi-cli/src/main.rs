@@ -161,6 +161,11 @@ struct Cli {
     list_resources: bool,
     #[arg(long = "list-prompts", action = clap::ArgAction::SetTrue)]
     list_prompts: bool,
+    /// Apply a Linux Landlock ruleset to the process so even pi itself
+    /// cannot read files outside the workspace. Best-effort: no-op on
+    /// non-Linux and on kernels < 5.13.
+    #[arg(long = "strict-sandbox", action = clap::ArgAction::SetTrue)]
+    strict_sandbox: bool,
     #[arg(long = "list-sessions", action = clap::ArgAction::SetTrue)]
     list_sessions: bool,
     #[arg(long = "delete-session", value_name = "ID")]
@@ -576,6 +581,47 @@ fn run(cli: Cli) -> PiResult<()> {
                 // child processes do not get killed mid-conversation.
                 let leaked: &'static pi_mcp::McpManager = Box::leak(Box::new(mcp_manager));
                 let _ = leaked;
+            }
+        }
+    }
+
+    // Opt-in syscall-level isolation. The user passed `--strict-sandbox` so
+    // we ratchet down the process FS view via Landlock (Linux ≥5.13). On
+    // other platforms or older kernels this returns Unsupported / NotApplied
+    // and we log to stderr but keep running.
+    if cli.strict_sandbox {
+        use pi_permissions::{landlock_supported, restrict_self, LandlockOutcome, LandlockPlan};
+        if !landlock_supported() {
+            eprintln!(
+                "提示：--strict-sandbox 仅在 Linux ≥5.13 生效；当前平台不支持，已忽略。"
+            );
+        } else {
+            let cwd = env::current_dir().ok();
+            let profile = pi_permissions::SandboxProfile {
+                workspace_root: cwd.as_ref().map(|p| p.display().to_string()),
+                extra_read_roots: vec![
+                    "/etc/ssl".into(),
+                    "/etc/resolv.conf".into(),
+                    "/etc/hosts".into(),
+                ],
+                allow_network: true,
+            };
+            let plan = LandlockPlan::from_profile(
+                &profile,
+                &[
+                    pi_permissions::Capability::ReadFile,
+                    pi_permissions::Capability::WriteFile,
+                    pi_permissions::Capability::Network,
+                ],
+            );
+            match restrict_self(&plan) {
+                LandlockOutcome::Applied { compatibility } => {
+                    eprintln!("[landlock] 已生效：{compatibility}");
+                }
+                LandlockOutcome::NotApplied { reason } => {
+                    eprintln!("[landlock] 未生效：{reason}");
+                }
+                LandlockOutcome::Unsupported => {}
             }
         }
     }

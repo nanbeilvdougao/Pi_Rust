@@ -646,6 +646,12 @@ impl Tool for BashTool {
         if let Some(cwd) = &parsed.cwd {
             command.current_dir(cwd);
         }
+        // Wrap the child command in the OS sandbox derived from the active
+        // permission engine. On Linux this prepends bwrap / firejail; on
+        // macOS sandbox-exec; on Windows we get a job-object placeholder.
+        // Without this, every `bash` invocation would silently escape the
+        // workspace_root allowlist that the engine advertises.
+        let _backend = pi_permissions::apply_sandbox(&mut command, permissions.sandbox());
         let timeout = Duration::from_millis(parsed.timeout_ms.unwrap_or(120_000));
 
         let mut child = command.spawn()?;
@@ -1243,6 +1249,28 @@ mod tests {
             .unwrap();
         assert!(out.output.contains("a.rs"));
         assert!(!out.output.contains("b.txt"));
+    }
+
+    #[test]
+    fn bash_runs_under_sandbox_wrapper_without_failing_on_no_op_backend() {
+        // When no sandbox backend is detected (typical test environment),
+        // apply_sandbox is a no-op and bash still runs the command. We just
+        // need to verify the wrap call doesn't itself break execution.
+        let runtime = runtime();
+        let mut perms = permissions();
+        let output = runtime
+            .run(
+                ToolCall {
+                    name: "bash".to_string(),
+                    input: serde_json::to_string(&json!({
+                        "command": "echo sandbox-ok",
+                    }))
+                    .unwrap(),
+                },
+                &mut perms,
+            )
+            .unwrap();
+        assert!(output.output.contains("sandbox-ok"), "got: {}", output.output);
     }
 
     #[test]

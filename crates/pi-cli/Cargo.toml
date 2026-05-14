@@ -17,6 +17,7 @@ pi-auth = { path = "../pi-auth", default-features = false, features = ["encrypte
 pi-core = { path = "../pi-core" }
 pi-ext = { path = "../pi-ext" }
 pi-mcp = { path = "../pi-mcp" }
+pi-permissions = { path = "../pi-permissions" }
 pi-providers = { path = "../pi-providers" }
 pi-session = { path = "../pi-session" }
 pi-tools = { path = "../pi-tools" }
