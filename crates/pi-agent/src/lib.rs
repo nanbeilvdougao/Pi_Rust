@@ -40,11 +40,25 @@ pub mod settings;
 pub mod skills;
 pub mod slash;
 pub mod source_info;
+pub mod subagent;
 pub mod system_prompt;
 pub use branch_summary::{
     merge_summaries, Branch, BranchSummarizer, BranchSummarizerConfig, BranchSummaryEntry,
 };
 pub use compaction::{maybe_compact, CompactionReport};
+pub use subagent::ConfigSpawner;
+
+fn register_task_tool(tools: &mut ToolRuntime, config: AppConfig) {
+    // Skip task tool registration when the parent has restricted the tool
+    // allowlist and explicitly omitted `task`.
+    if let Some(names) = &config.enabled_tool_names {
+        if !names.iter().any(|n| n == "task") {
+            return;
+        }
+    }
+    let spawner = std::sync::Arc::new(subagent::ConfigSpawner::new(config));
+    tools.register(Box::new(pi_tools::task::TaskTool::new(spawner)));
+}
 pub use fs_watch::{WatchedState, WorkspaceWatcher};
 pub use settings::PersistedSettings;
 pub use skills::{Skill, SkillSet, SkillTrigger};
@@ -82,10 +96,12 @@ impl<S: SessionStore> AgentRuntime<S> {
             slash.load_custom(cwd);
         }
         let watcher = cwd.as_deref().map(WorkspaceWatcher::start);
+        let mut tools = ToolRuntime::builtin();
+        register_task_tool(&mut tools, config.clone());
         Self {
             config,
             session_store,
-            tools: ToolRuntime::builtin(),
+            tools,
             permissions: PermissionEngine::new(mode),
             cancel: Arc::new(AtomicBool::new(false)),
             slash,
@@ -95,10 +111,11 @@ impl<S: SessionStore> AgentRuntime<S> {
     }
 
     pub fn try_new(config: AppConfig, session_store: S) -> PiResult<Self> {
-        let tools = match &config.enabled_tool_names {
+        let mut tools = match &config.enabled_tool_names {
             Some(names) => ToolRuntime::builtin_with_names(names)?,
             None => ToolRuntime::builtin(),
         };
+        register_task_tool(&mut tools, config.clone());
 
         let mode = permission_mode(&config.permission_mode);
         let cwd = std::env::current_dir().ok();

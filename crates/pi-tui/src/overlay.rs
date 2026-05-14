@@ -49,6 +49,8 @@ pub enum Overlay {
     Tree(TreeOverlay),
     ShowImages(ListOverlay<ImageItem>),
     Extension(ListOverlay<ExtensionItem>),
+    Agent(ListOverlay<AgentItem>),
+    Mcp(ListOverlay<McpItem>),
 }
 
 /// What the overlay produced when the user pressed Enter (or otherwise
@@ -66,6 +68,8 @@ pub enum OverlayOutcome {
     AttachPath(PathBuf),
     RemoveImage(usize),
     ToggleExtension(String),
+    SwitchAgent(String),
+    ToggleMcp(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +208,39 @@ impl Labelled for ExtensionItem {
     fn label(&self) -> String {
         let mark = if self.enabled { "[x]" } else { "[ ]" };
         format!("{} {}", mark, self.label)
+    }
+    fn hint(&self) -> Option<String> {
+        Some(self.id.clone())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentItem {
+    pub id: String,
+    pub label: String,
+    pub system: Option<String>,
+}
+
+impl Labelled for AgentItem {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+    fn hint(&self) -> Option<String> {
+        Some(self.id.clone())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpItem {
+    pub id: String,
+    pub label: String,
+    pub running: bool,
+}
+
+impl Labelled for McpItem {
+    fn label(&self) -> String {
+        let mark = if self.running { "●" } else { "○" };
+        format!("{mark} {}", self.label)
     }
     fn hint(&self) -> Option<String> {
         Some(self.id.clone())
@@ -377,6 +414,12 @@ impl Overlay {
             Overlay::Extension(list) => handle_list(list, key, |item| {
                 OverlayOutcome::ToggleExtension(item.id.clone())
             }),
+            Overlay::Agent(list) => {
+                handle_list(list, key, |item| OverlayOutcome::SwitchAgent(item.id.clone()))
+            }
+            Overlay::Mcp(list) => {
+                handle_list(list, key, |item| OverlayOutcome::ToggleMcp(item.id.clone()))
+            }
             Overlay::Login(login) => handle_login(login, key),
             Overlay::Tree(tree) => handle_tree(tree, key),
         }
@@ -520,6 +563,8 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, overlay: &Overlay, theme: &Theme)
         Overlay::Thinking(list) => draw_list(frame, popup, list, theme),
         Overlay::ShowImages(list) => draw_list(frame, popup, list, theme),
         Overlay::Extension(list) => draw_list(frame, popup, list, theme),
+        Overlay::Agent(list) => draw_list(frame, popup, list, theme),
+        Overlay::Mcp(list) => draw_list(frame, popup, list, theme),
         Overlay::Login(login) => draw_login(frame, popup, login, theme),
         Overlay::Tree(tree) => draw_tree(frame, popup, tree, theme),
     }
@@ -908,6 +953,42 @@ mod tests {
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    #[test]
+    fn agent_overlay_returns_switch_agent() {
+        let mut overlay = Overlay::Agent(ListOverlay::new(
+            "agent",
+            vec![
+                AgentItem {
+                    id: "default".into(),
+                    label: "default".into(),
+                    system: None,
+                },
+                AgentItem {
+                    id: "researcher".into(),
+                    label: "researcher".into(),
+                    system: Some("research mode".into()),
+                },
+            ],
+        ));
+        overlay.handle_key(&key(KeyCode::Down));
+        let outcome = overlay.handle_key(&key(KeyCode::Enter));
+        assert_eq!(outcome, OverlayOutcome::SwitchAgent("researcher".into()));
+    }
+
+    #[test]
+    fn mcp_overlay_returns_toggle_mcp() {
+        let mut overlay = Overlay::Mcp(ListOverlay::new(
+            "MCP",
+            vec![McpItem {
+                id: "filesystem".into(),
+                label: "filesystem".into(),
+                running: false,
+            }],
+        ));
+        let outcome = overlay.handle_key(&key(KeyCode::Enter));
+        assert_eq!(outcome, OverlayOutcome::ToggleMcp("filesystem".into()));
     }
 
     #[test]

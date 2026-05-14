@@ -365,6 +365,14 @@ where
                     state.overlay = Some(build_extension_overlay(&cwd));
                     continue;
                 }
+                if keys.matches("agent-select", &key) {
+                    state.overlay = Some(build_agent_overlay(&cwd));
+                    continue;
+                }
+                if keys.matches("mcp-select", &key) {
+                    state.overlay = Some(build_mcp_overlay(&cwd));
+                    continue;
+                }
                 if state.show_quit_confirm {
                     match key.code {
                         KeyCode::Char('y') | KeyCode::Char('Y') => return Ok(()),
@@ -744,6 +752,55 @@ fn draw<S>(
         .block(input_block)
         .wrap(Wrap { trim: false });
     frame.render_widget(input, chunks[2]);
+
+    // Todo list panel — top-right corner of the transcript area, only when
+    // the current session has any todos written via the `todo` tool.
+    if let Ok(list) = pi_tools::todo::load_current() {
+        if !list.items.is_empty() {
+            let height = (list.items.len() as u16 + 2).min(10);
+            let width = 40u16.min(chunks[0].width / 3);
+            let area = ratatui::layout::Rect {
+                x: chunks[0].x + chunks[0].width.saturating_sub(width).saturating_sub(1),
+                y: chunks[0].y + 1,
+                width,
+                height,
+            };
+            let body: Vec<Line<'static>> = list
+                .items
+                .iter()
+                .take(8)
+                .map(|item| {
+                    let glyph = match item.status {
+                        pi_tools::todo::TodoStatus::Pending => "[ ]",
+                        pi_tools::todo::TodoStatus::InProgress => "[…]",
+                        pi_tools::todo::TodoStatus::Completed => "[x]",
+                    };
+                    let color = match item.status {
+                        pi_tools::todo::TodoStatus::Pending => theme.hint,
+                        pi_tools::todo::TodoStatus::InProgress => theme.accent,
+                        pi_tools::todo::TodoStatus::Completed => theme.assistant,
+                    };
+                    Line::from(vec![
+                        Span::styled(format!("{glyph} "), Style::default().fg(color)),
+                        Span::raw(truncate(&item.text, 28)),
+                    ])
+                })
+                .collect();
+            let widget = Paragraph::new(body).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Todo ")
+                    .border_style(Style::default().fg(theme.accent))
+                    .title_style(
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+            );
+            frame.render_widget(ratatui::widgets::Clear, area);
+            frame.render_widget(widget, area);
+        }
+    }
 
     if let Some(active) = state.active_tool.as_deref() {
         if let Some(lines) = state.tool_progress.get(active) {
@@ -1202,6 +1259,73 @@ fn build_login_overlay() -> overlay::Overlay {
     overlay::Overlay::Login(overlay::LoginOverlay::new(providers))
 }
 
+fn build_agent_overlay(cwd: &Option<std::path::PathBuf>) -> overlay::Overlay {
+    let mut items: Vec<overlay::AgentItem> = Vec::new();
+    items.push(overlay::AgentItem {
+        id: "default".to_string(),
+        label: "default (主代理)".to_string(),
+        system: None,
+    });
+    if let Some(root) = cwd.as_ref().map(|c| c.join(".pi").join("agents")) {
+        if let Ok(read) = std::fs::read_dir(&root) {
+            for entry in read.flatten() {
+                let path = entry.path();
+                let name = path
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    continue;
+                }
+                let system = std::fs::read_to_string(&path).ok().map(|s| {
+                    s.lines()
+                        .filter(|l| !l.starts_with('#'))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                });
+                items.push(overlay::AgentItem {
+                    id: name.clone(),
+                    label: name,
+                    system,
+                });
+            }
+        }
+    }
+    overlay::Overlay::Agent(overlay::ListOverlay::new("切换子代理 / 主代理", items))
+}
+
+fn build_mcp_overlay(cwd: &Option<std::path::PathBuf>) -> overlay::Overlay {
+    let mut items: Vec<overlay::McpItem> = Vec::new();
+    if let Some(path) = cwd.as_ref().map(|c| c.join(".pi").join("mcp.toml")) {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(parsed) = toml::from_str::<toml::Value>(&text) {
+                if let Some(servers) = parsed.get("servers").and_then(|v| v.as_table()) {
+                    for (id, value) in servers {
+                        let label = value
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(id.as_str())
+                            .to_string();
+                        items.push(overlay::McpItem {
+                            id: id.clone(),
+                            label,
+                            running: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if items.is_empty() {
+        items.push(overlay::McpItem {
+            id: "(none)".into(),
+            label: "未发现 MCP 服务器 — 在 .pi/mcp.toml 中声明".into(),
+            running: false,
+        });
+    }
+    overlay::Overlay::Mcp(overlay::ListOverlay::new("MCP 服务器", items))
+}
+
 fn build_extension_overlay(cwd: &Option<std::path::PathBuf>) -> overlay::Overlay {
     let mut items: Vec<overlay::ExtensionItem> = Vec::new();
     if let Some(root) = cwd.as_ref().map(|c| c.join(".pi").join("extensions")) {
@@ -1301,6 +1425,26 @@ fn apply_overlay_outcome<S: SessionStore>(
         }
         overlay::OverlayOutcome::ToggleExtension(id) => {
             state.status = format!("扩展切换：{id} (重启 pi 生效)");
+            state.overlay = None;
+        }
+        overlay::OverlayOutcome::SwitchAgent(id) => {
+            // Look up the selected agent's system prompt from the overlay
+            // before we drop it.
+            let system = if let Some(overlay::Overlay::Agent(list)) = &state.overlay {
+                list.items.iter().find(|i| i.id == id).and_then(|i| i.system.clone())
+            } else {
+                None
+            };
+            agent.config_mut().system_prompt = system.clone();
+            state.status = if system.is_some() {
+                format!("已切换到子代理：{id}")
+            } else {
+                "已切换回主代理".to_string()
+            };
+            state.overlay = None;
+        }
+        overlay::OverlayOutcome::ToggleMcp(id) => {
+            state.status = format!("MCP 服务器 {id} 状态变更将在下次会话生效");
             state.overlay = None;
         }
         overlay::OverlayOutcome::LoginSubmit(sub) => {

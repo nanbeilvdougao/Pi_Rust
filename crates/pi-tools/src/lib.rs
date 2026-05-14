@@ -33,7 +33,11 @@ use serde_json::{json, Value};
 pub mod diff;
 pub mod image_gen;
 pub mod mutation_queue;
+pub mod task;
+pub mod todo;
 pub mod truncate;
+pub mod webfetch;
+pub mod websearch;
 
 use mutation_queue::with_path_lock;
 
@@ -160,6 +164,9 @@ fn builtin_tools() -> Vec<Box<dyn Tool>> {
         Box::new(LsTool),
         Box::new(EpkgTool),
         Box::new(image_gen::ImageGenerateTool),
+        Box::new(webfetch::WebFetchTool),
+        Box::new(websearch::WebSearchTool),
+        Box::new(todo::TodoTool),
     ]
 }
 

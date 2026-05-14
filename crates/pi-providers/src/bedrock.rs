@@ -1,11 +1,15 @@
 //! AWS Bedrock provider.
 //!
-//! Routes Anthropic-on-Bedrock today (`anthropic.claude-*`), with the
-//! `invokeModel` non-streaming endpoint. Streaming via
-//! `invokeModelWithResponseStream` uses AWS's binary event-stream framing
-//! which would require a 400-line parser; we fall back to the trait's
-//! default `stream` (replaying captured events) so the agent loop and TUI
-//! still get well-formed `StreamEvent`s — just not per-token deltas.
+//! Routes Anthropic-on-Bedrock (`anthropic.claude-*`). Two endpoints:
+//!
+//! - `invokeModel` — non-streaming, classic Anthropic body shape.
+//! - `invokeModelWithResponseStream` — streaming over AWS's binary
+//!   `application/vnd.amazon.eventstream` framing. Each event has a small
+//!   header block plus a JSON payload of shape `{"bytes": "<base64>"}`,
+//!   where the base64 decodes into the same Anthropic SSE event JSON we
+//!   already understand (`message_start`, `content_block_delta`,
+//!   `message_delta`, `message_stop`, …). We parse the binary frames with
+//!   `crate::aws_event_stream` and map them into `StreamEvent`s.
 //!
 //! Credentials come from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
 //! `AWS_SESSION_TOKEN` env vars (mirroring the AWS CLI). Region defaults
@@ -16,10 +20,14 @@
 use std::collections::BTreeMap;
 use std::env;
 
-use pi_core::{Message, PiError, PiErrorKind, PiResult, Role, StreamEvent, ToolInvocation, Usage};
+use pi_core::{
+    base64_decode, Message, PiError, PiErrorKind, PiResult, Role, StreamEvent, StreamSink,
+    ToolInvocation, Usage,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::aws_event_stream::{parse as parse_event_stream, EventStreamMessage};
 use crate::sigv4::SigV4Request;
 use crate::{
     http_agent, text_stream_events, tool_call_stream_events, Provider, ProviderInfo,
@@ -86,9 +94,266 @@ impl Provider for BedrockProvider {
             .map_err(|err| PiError::new(PiErrorKind::Network, err.to_string()))?;
         parse_anthropic_response(&text)
     }
-    // stream() inherits the default implementation: emits the captured
-    // events through the sink. AWS event-stream framing is out of scope
-    // until upstream demand justifies a 400-line binary parser.
+    fn stream(
+        &self,
+        request: ProviderRequest,
+        sink: &mut dyn StreamSink,
+    ) -> PiResult<ProviderResponse> {
+        let creds = load_credentials()?;
+        let region = env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string());
+        let host = format!("bedrock-runtime.{region}.amazonaws.com");
+        let model_id = uri_segment_encode(&request.model.model);
+        let path = format!("/model/{model_id}/invoke-with-response-stream");
+        let body = build_anthropic_body(&request);
+        let body_bytes = serde_json::to_vec(&body)?;
+
+        let mut headers = BTreeMap::new();
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert(
+            "x-amzn-bedrock-accept".to_string(),
+            "application/vnd.amazon.eventstream".to_string(),
+        );
+        let signed = SigV4Request {
+            method: "POST",
+            host: &host,
+            path: &path,
+            query: "",
+            headers,
+            body: &body_bytes,
+            region: &region,
+            service: "bedrock",
+            access_key: &creds.access_key,
+            secret_key: &creds.secret_key,
+            session_token: creds.session_token.as_deref(),
+        }
+        .sign();
+
+        let url = format!("https://{host}{path}");
+        let mut req = http_agent().post(&url);
+        for (k, v) in &signed.headers {
+            if k == "host" {
+                continue;
+            }
+            req = req.set(k, v);
+        }
+        let response = match req.send_bytes(&body_bytes) {
+            Ok(response) => response,
+            Err(ureq::Error::Status(status, response)) => {
+                let body = response.into_string().unwrap_or_default();
+                return Err(PiError::new(
+                    PiErrorKind::Provider,
+                    format!("Bedrock invokeModelWithResponseStream HTTP {status}：{body}"),
+                ));
+            }
+            Err(ureq::Error::Transport(err)) => {
+                return Err(PiError::new(
+                    PiErrorKind::Network,
+                    format!("Bedrock invokeModelWithResponseStream 传输错误：{err}"),
+                ));
+            }
+        };
+
+        sink.emit(StreamEvent::MessageStart)?;
+        let mut text_buf = String::new();
+        let mut tool_calls: Vec<ToolInvocation> = Vec::new();
+        let mut tool_input_buf: BTreeMap<usize, String> = BTreeMap::new();
+        let mut tool_index_to_id: BTreeMap<usize, String> = BTreeMap::new();
+        let mut usage = Usage::default();
+        let mut errored: Option<PiError> = None;
+
+        parse_event_stream(response.into_reader(), |msg| {
+            if sink.cancelled() {
+                return Err(PiError::new(PiErrorKind::Cancelled, "已取消"));
+            }
+            if let Err(err) = handle_bedrock_message(
+                &msg,
+                sink,
+                &mut text_buf,
+                &mut tool_calls,
+                &mut tool_input_buf,
+                &mut tool_index_to_id,
+                &mut usage,
+            ) {
+                errored = Some(err);
+            }
+            Ok(())
+        })?;
+        sink.emit(StreamEvent::MessageDone)?;
+        if let Some(err) = errored {
+            return Err(err);
+        }
+        // Stitch partial tool input deltas into final invocations.
+        for (idx, input) in tool_input_buf {
+            if let Some(call) = tool_calls.iter_mut().find(|c| {
+                tool_index_to_id
+                    .get(&idx)
+                    .map(|id| c.id.as_deref() == Some(id.as_str()))
+                    .unwrap_or(false)
+            }) {
+                call.input = input;
+            }
+        }
+
+        let stream_events = if tool_calls.is_empty() {
+            text_stream_events(&text_buf)
+        } else {
+            tool_call_stream_events(&tool_calls)
+        };
+        let events = if text_buf.is_empty() {
+            Vec::new()
+        } else {
+            vec![text_buf.clone()]
+        };
+        let mut message = Message::new(Role::Assistant, text_buf);
+        message.tool_calls = tool_calls.clone();
+        Ok(ProviderResponse {
+            message,
+            events,
+            stream_events,
+            tool_calls,
+            usage,
+        })
+    }
+}
+
+/// Decode the embedded base64 chunk inside a Bedrock event-stream message
+/// and emit the corresponding StreamEvent. Mirrors Anthropic's SSE event
+/// taxonomy so callers can reuse the same downstream handlers.
+fn handle_bedrock_message(
+    msg: &EventStreamMessage,
+    sink: &mut dyn StreamSink,
+    text_buf: &mut String,
+    tool_calls: &mut Vec<ToolInvocation>,
+    tool_input_buf: &mut BTreeMap<usize, String>,
+    tool_index_to_id: &mut BTreeMap<usize, String>,
+    usage: &mut Usage,
+) -> PiResult<()> {
+    let message_type = msg.header(":message-type").unwrap_or("event");
+    if message_type == "exception" {
+        let text = String::from_utf8_lossy(&msg.payload).to_string();
+        return Err(PiError::new(
+            PiErrorKind::Provider,
+            format!("Bedrock 流式异常：{text}"),
+        ));
+    }
+    let outer: Value = serde_json::from_slice(&msg.payload).map_err(|err| {
+        PiError::new(
+            PiErrorKind::Provider,
+            format!("Bedrock 流式 payload 解析失败：{err}"),
+        )
+    })?;
+    let inner_bytes = outer.get("bytes").and_then(|v| v.as_str()).ok_or_else(|| {
+        PiError::new(
+            PiErrorKind::Provider,
+            "Bedrock 流式 payload 缺少 bytes 字段",
+        )
+    })?;
+    let decoded = base64_decode(inner_bytes).ok_or_else(|| {
+        PiError::new(
+            PiErrorKind::Provider,
+            "Bedrock 流式 payload base64 解码失败",
+        )
+    })?;
+    let event: Value = serde_json::from_slice(&decoded).map_err(|err| {
+        PiError::new(
+            PiErrorKind::Provider,
+            format!("Bedrock 流式事件解析失败：{err}"),
+        )
+    })?;
+    let kind = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    match kind {
+        "content_block_start" => {
+            if let Some(block) = event.get("content_block") {
+                if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
+                    let idx = event
+                        .get("index")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
+                    let id = block
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = block
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    tool_calls.push(ToolInvocation {
+                        id: Some(id.clone()),
+                        name: name.clone(),
+                        input: String::new(),
+                    });
+                    tool_index_to_id.insert(idx, id.clone());
+                    sink.emit(StreamEvent::ToolCallDelta {
+                        id: Some(id),
+                        name: Some(name),
+                        input_delta: String::new(),
+                    })?;
+                }
+            }
+        }
+        "content_block_delta" => {
+            if let Some(delta) = event.get("delta") {
+                let delta_type = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match delta_type {
+                    "text_delta" => {
+                        if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                            if !text.is_empty() {
+                                text_buf.push_str(text);
+                                sink.emit(StreamEvent::TextDelta(text.to_string()))?;
+                            }
+                        }
+                    }
+                    "thinking_delta" => {
+                        if let Some(text) = delta.get("thinking").and_then(|v| v.as_str()) {
+                            sink.emit(StreamEvent::ThinkingDelta(text.to_string()))?;
+                        }
+                    }
+                    "input_json_delta" => {
+                        if let Some(partial) =
+                            delta.get("partial_json").and_then(|v| v.as_str())
+                        {
+                            let idx = event
+                                .get("index")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0) as usize;
+                            tool_input_buf
+                                .entry(idx)
+                                .or_default()
+                                .push_str(partial);
+                            let id = tool_index_to_id.get(&idx).cloned();
+                            sink.emit(StreamEvent::ToolCallDelta {
+                                id,
+                                name: None,
+                                input_delta: partial.to_string(),
+                            })?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        "message_delta" => {
+            if let Some(u) = event.get("usage") {
+                if let Some(out) = u.get("output_tokens").and_then(|v| v.as_u64()) {
+                    usage.completion_tokens = out as u32;
+                    usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+                    sink.emit(StreamEvent::UsageDelta(usage.clone()))?;
+                }
+            }
+        }
+        "message_start" => {
+            if let Some(u) = event.pointer("/message/usage") {
+                if let Some(input) = u.get("input_tokens").and_then(|v| v.as_u64()) {
+                    usage.prompt_tokens = input as u32;
+                }
+            }
+        }
+        "message_stop" | "content_block_stop" | "ping" => {}
+        _ => {}
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -334,6 +599,116 @@ mod tests {
         assert_eq!(body["max_tokens"], 123);
         assert_eq!(body["system"], "be terse");
         assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn handle_bedrock_message_routes_text_delta_via_base64_payload() {
+        struct CapturingSink {
+            text: String,
+            tool_deltas: Vec<String>,
+        }
+        impl pi_core::StreamSink for CapturingSink {
+            fn emit(&mut self, event: pi_core::StreamEvent) -> PiResult<()> {
+                match event {
+                    pi_core::StreamEvent::TextDelta(t) => self.text.push_str(&t),
+                    pi_core::StreamEvent::ToolCallDelta { input_delta, .. } => {
+                        self.tool_deltas.push(input_delta)
+                    }
+                    _ => {}
+                }
+                Ok(())
+            }
+            fn cancelled(&self) -> bool {
+                false
+            }
+        }
+        let inner = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "hello "}
+        });
+        let inner_b = pi_core::base64_encode(&serde_json::to_vec(&inner).unwrap());
+        let outer = serde_json::json!({"bytes": inner_b}).to_string();
+        let msg = EventStreamMessage {
+            headers: vec![(":message-type".to_string(), "event".to_string())],
+            payload: outer.into_bytes(),
+        };
+        let mut sink = CapturingSink {
+            text: String::new(),
+            tool_deltas: Vec::new(),
+        };
+        let mut text = String::new();
+        let mut calls = Vec::new();
+        let mut buf = BTreeMap::new();
+        let mut id_map = BTreeMap::new();
+        let mut usage = Usage::default();
+        super::handle_bedrock_message(
+            &msg,
+            &mut sink,
+            &mut text,
+            &mut calls,
+            &mut buf,
+            &mut id_map,
+            &mut usage,
+        )
+        .expect("handle");
+        assert_eq!(text, "hello ");
+        assert_eq!(sink.text, "hello ");
+    }
+
+    #[test]
+    fn handle_bedrock_message_routes_tool_use_blocks() {
+        struct NullSink;
+        impl pi_core::StreamSink for NullSink {
+            fn emit(&mut self, _e: pi_core::StreamEvent) -> PiResult<()> {
+                Ok(())
+            }
+            fn cancelled(&self) -> bool {
+                false
+            }
+        }
+        let start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "call_1", "name": "ls"}
+        });
+        let delta = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": "{\"path\":\".\""}
+        });
+        let delta2 = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": "}"}
+        });
+        let mut text = String::new();
+        let mut calls = Vec::new();
+        let mut buf = BTreeMap::new();
+        let mut id_map = BTreeMap::new();
+        let mut usage = Usage::default();
+        for inner in [start, delta, delta2] {
+            let inner_b = pi_core::base64_encode(&serde_json::to_vec(&inner).unwrap());
+            let outer = serde_json::json!({"bytes": inner_b}).to_string();
+            let msg = EventStreamMessage {
+                headers: vec![(":message-type".to_string(), "event".to_string())],
+                payload: outer.into_bytes(),
+            };
+            super::handle_bedrock_message(
+                &msg,
+                &mut NullSink,
+                &mut text,
+                &mut calls,
+                &mut buf,
+                &mut id_map,
+                &mut usage,
+            )
+            .expect("handle");
+        }
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "ls");
+        assert_eq!(calls[0].id.as_deref(), Some("call_1"));
+        assert_eq!(buf.get(&0).map(|s| s.as_str()), Some("{\"path\":\".\"}"));
     }
 
     #[test]

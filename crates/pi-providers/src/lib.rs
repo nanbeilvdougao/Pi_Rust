@@ -27,6 +27,7 @@ use serde_json::{json, Value};
 
 pub mod aliases;
 pub mod anthropic;
+pub mod aws_event_stream;
 pub mod azure;
 pub mod bedrock;
 pub mod cloudflare;

@@ -137,6 +137,49 @@ pub trait SessionStore {
     fn append(&self, id: &str, message: &Message) -> PiResult<()>;
 }
 
+/// Non-persistent session store. Used for subagents (`task` tool) so a child
+/// agent run does not pollute the parent's `.jsonl` files. Thread-safe; the
+/// inner map is wrapped in `Mutex` so multiple subagents can share a store.
+#[derive(Debug, Default)]
+pub struct InMemorySessionStore {
+    inner: std::sync::Mutex<std::collections::BTreeMap<String, Vec<Message>>>,
+}
+
+impl InMemorySessionStore {
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+        }
+    }
+}
+
+impl SessionStore for InMemorySessionStore {
+    fn load(&self, id: &str) -> PiResult<Session> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|err| PiError::new(PiErrorKind::Session, format!("锁失败：{err}")))?;
+        let messages = guard.get(id).cloned().unwrap_or_default();
+        Ok(Session {
+            id: id.to_string(),
+            messages,
+            title: None,
+            provider: None,
+            model: None,
+            header: None,
+        })
+    }
+
+    fn append(&self, id: &str, message: &Message) -> PiResult<()> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|err| PiError::new(PiErrorKind::Session, format!("锁失败：{err}")))?;
+        guard.entry(id.to_string()).or_default().push(message.clone());
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct JsonlSessionStore {
     root: PathBuf,

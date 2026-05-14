@@ -76,6 +76,50 @@ pub struct McpServer {
     id: String,
     inner: Arc<Mutex<ServerInner>>,
     tools: Vec<RemoteToolSchema>,
+    resources: Vec<RemoteResource>,
+    prompts: Vec<RemotePrompt>,
+    capabilities: ServerCapabilities,
+}
+
+/// Capability flags advertised by the remote server's `initialize` response.
+/// `tools` is always assumed (we already register every advertised tool);
+/// `resources` / `prompts` gate the corresponding RPC calls so we don't
+/// poke servers that don't speak those protocols.
+#[derive(Debug, Clone, Default)]
+pub struct ServerCapabilities {
+    pub tools: bool,
+    pub resources: bool,
+    pub prompts: bool,
+    pub logging: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoteResource {
+    pub uri: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default, rename = "mimeType")]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemotePrompt {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub arguments: Vec<RemotePromptArgument>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemotePromptArgument {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: Option<bool>,
 }
 
 struct ServerInner {
@@ -128,28 +172,51 @@ impl McpServer {
         }));
 
         // Initialize handshake.
-        Self::rpc_request(
+        let init = Self::rpc_request(
             &inner,
             "initialize",
             json!({
                 "protocolVersion": "2024-11-05",
-                "capabilities": {},
+                "capabilities": {"tools": {}, "resources": {}, "prompts": {}, "logging": {}},
                 "clientInfo": {"name": "pi-rust", "version": pi_core::VERSION},
             }),
         )?;
-        Self::notify(&inner, "initialized")?;
+        let capabilities = parse_capabilities(&init);
+        Self::notify(&inner, "initialized", Value::Null)?;
 
-        // Enumerate remote tools.
+        // Enumerate remote tools (every server we care about implements this).
         let tool_list = Self::rpc_request(&inner, "tools/list", json!({}))?;
         let tools: Vec<RemoteToolSchema> = tool_list
             .get("tools")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
 
+        // Resources / prompts are optional; skip the call if the server did
+        // not advertise the capability.
+        let resources = if capabilities.resources {
+            let list = Self::rpc_request(&inner, "resources/list", json!({}))?;
+            list.get("resources")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let prompts = if capabilities.prompts {
+            let list = Self::rpc_request(&inner, "prompts/list", json!({}))?;
+            list.get("prompts")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         Ok(Self {
             id: spec.id.clone(),
             inner,
             tools,
+            resources,
+            prompts,
+            capabilities,
         })
     }
 
@@ -224,11 +291,14 @@ impl McpServer {
         }
     }
 
-    fn notify(inner: &Arc<Mutex<ServerInner>>, method: &str) -> PiResult<()> {
+    fn notify(inner: &Arc<Mutex<ServerInner>>, method: &str, params: Value) -> PiResult<()> {
         let mut guard = inner
             .lock()
             .map_err(|err| PiError::new(PiErrorKind::Tool, format!("MCP lock 失败：{err}")))?;
-        let frame = json!({"jsonrpc": "2.0", "method": format!("notifications/{method}")});
+        let mut frame = json!({"jsonrpc": "2.0", "method": format!("notifications/{method}")});
+        if !params.is_null() {
+            frame["params"] = params;
+        }
         let mut line = serde_json::to_string(&frame)?;
         line.push('\n');
         guard
@@ -239,6 +309,100 @@ impl McpServer {
             PiError::new(PiErrorKind::Tool, format!("MCP stdin flush 失败：{err}"))
         })?;
         Ok(())
+    }
+
+    /// Drain any pending notifications without blocking. Returns the list of
+    /// `{"method": ..., "params": ...}` notifications the server pushed
+    /// asynchronously (e.g. `notifications/tools/list_changed`,
+    /// `notifications/resources/updated`, `notifications/message`).
+    pub fn drain_notifications(&self, timeout_ms: u64) -> PiResult<Vec<Notification>> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|err| PiError::new(PiErrorKind::Tool, format!("MCP lock 失败：{err}")))?;
+        let mut out = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        // We rely on a small poll: ChildStdout doesn't expose set_nonblocking
+        // portably, so we use BufReader::fill_buf with a timeout via the
+        // child's stdout — best effort. For Linux/macOS this returns quickly
+        // when there is no buffered data because we just peek the buffer.
+        loop {
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            let available = match guard.reader.fill_buf() {
+                Ok(buf) => buf.len(),
+                Err(_) => 0,
+            };
+            if available == 0 {
+                break;
+            }
+            let mut line = String::new();
+            let n = guard
+                .reader
+                .read_line(&mut line)
+                .map_err(|err| PiError::new(PiErrorKind::Tool, format!("读取 MCP 通知失败：{err}")))?;
+            if n == 0 {
+                break;
+            }
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                continue;
+            }
+            let value: Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            // Notifications never carry `id`; responses do.
+            if value.get("id").is_some() {
+                continue;
+            }
+            if let Some(method) = value.get("method").and_then(|v| v.as_str()) {
+                out.push(Notification {
+                    method: method.to_string(),
+                    params: value.get("params").cloned().unwrap_or(Value::Null),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Fetch a resource's contents via `resources/read`.
+    pub fn read_resource(&self, uri: &str) -> PiResult<Value> {
+        if !self.capabilities.resources {
+            return Err(PiError::new(
+                PiErrorKind::Tool,
+                format!("MCP server {} 未声明 resources 能力", self.id),
+            ));
+        }
+        Self::rpc_request(&self.inner, "resources/read", json!({"uri": uri}))
+    }
+
+    /// Materialize a prompt via `prompts/get`.
+    pub fn get_prompt(&self, name: &str, arguments: Value) -> PiResult<Value> {
+        if !self.capabilities.prompts {
+            return Err(PiError::new(
+                PiErrorKind::Tool,
+                format!("MCP server {} 未声明 prompts 能力", self.id),
+            ));
+        }
+        Self::rpc_request(
+            &self.inner,
+            "prompts/get",
+            json!({"name": name, "arguments": arguments}),
+        )
+    }
+
+    pub fn resources(&self) -> &[RemoteResource] {
+        &self.resources
+    }
+
+    pub fn prompts(&self) -> &[RemotePrompt] {
+        &self.prompts
+    }
+
+    pub fn capabilities(&self) -> &ServerCapabilities {
+        &self.capabilities
     }
 
     pub fn call_tool(&self, tool_name: &str, arguments: Value) -> PiResult<String> {
@@ -260,6 +424,22 @@ impl McpServer {
             out = serde_json::to_string(&result).unwrap_or_default();
         }
         Ok(out)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Notification {
+    pub method: String,
+    pub params: Value,
+}
+
+fn parse_capabilities(init: &Value) -> ServerCapabilities {
+    let caps = init.pointer("/capabilities").cloned().unwrap_or(Value::Null);
+    ServerCapabilities {
+        tools: caps.get("tools").is_some(),
+        resources: caps.get("resources").is_some(),
+        prompts: caps.get("prompts").is_some(),
+        logging: caps.get("logging").is_some(),
     }
 }
 
@@ -299,6 +479,46 @@ impl McpManager {
 
     pub fn server_ids(&self) -> Vec<String> {
         self.servers.keys().cloned().collect()
+    }
+
+    pub fn server(&self, id: &str) -> Option<&Arc<McpServer>> {
+        self.servers.get(id)
+    }
+
+    /// Collect every resource advertised by every server, prefixed with the
+    /// server id so the caller can disambiguate when multiple servers expose
+    /// resources with the same URI.
+    pub fn all_resources(&self) -> Vec<(String, RemoteResource)> {
+        let mut out = Vec::new();
+        for (id, server) in &self.servers {
+            for resource in server.resources() {
+                out.push((id.clone(), resource.clone()));
+            }
+        }
+        out
+    }
+
+    /// Same shape as `all_resources` but for prompt templates.
+    pub fn all_prompts(&self) -> Vec<(String, RemotePrompt)> {
+        let mut out = Vec::new();
+        for (id, server) in &self.servers {
+            for prompt in server.prompts() {
+                out.push((id.clone(), prompt.clone()));
+            }
+        }
+        out
+    }
+
+    /// Drain notifications from every server. Returns `(server_id, notification)`
+    /// tuples so consumers know where each event originated.
+    pub fn drain_notifications(&self, timeout_ms: u64) -> PiResult<Vec<(String, Notification)>> {
+        let mut out = Vec::new();
+        for (id, server) in &self.servers {
+            for notification in server.drain_notifications(timeout_ms)? {
+                out.push((id.clone(), notification));
+            }
+        }
+        Ok(out)
     }
 
     /// Wire every advertised MCP tool into `runtime` as a `Tool` that runs
@@ -393,6 +613,88 @@ for line in sys.stdin:
         )
         .unwrap();
         path
+    }
+
+    fn write_python_full_server(dir: &Path) -> std::path::PathBuf {
+        let path = dir.join("full_server.py");
+        fs::write(
+            &path,
+            r#"
+import sys
+import json
+
+def send(payload):
+    sys.stdout.write(json.dumps(payload) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method")
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":req["id"],"result":{"capabilities":{"tools":{},"resources":{},"prompts":{}},"serverInfo":{"name":"full","version":"0.0.1"}}})
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0","id":req["id"],"result":{"tools":[{"name":"noop","description":"","inputSchema":{}}]}})
+    elif method == "resources/list":
+        send({"jsonrpc":"2.0","id":req["id"],"result":{"resources":[{"uri":"file:///hello.txt","name":"hello","mimeType":"text/plain"}]}})
+    elif method == "resources/read":
+        send({"jsonrpc":"2.0","id":req["id"],"result":{"contents":[{"uri":req["params"]["uri"],"text":"hi"}]}})
+    elif method == "prompts/list":
+        send({"jsonrpc":"2.0","id":req["id"],"result":{"prompts":[{"name":"summary","description":"summarize","arguments":[{"name":"topic","required":True}]}]}})
+    elif method == "prompts/get":
+        send({"jsonrpc":"2.0","id":req["id"],"result":{"description":"summarize","messages":[{"role":"user","content":{"type":"text","text":"hi " + req["params"]["arguments"].get("topic","")}}]}})
+    elif method and method.startswith("notifications/"):
+        pass
+    else:
+        send({"jsonrpc":"2.0","id":req.get("id"),"error":{"code":-32601,"message":"unknown"}})
+"#,
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn manager_loads_resources_and_prompts_from_capable_server() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let script = write_python_full_server(dir.path());
+        let config = McpConfig {
+            servers: vec![ServerSpec {
+                id: "full".to_string(),
+                command: "python3".to_string(),
+                args: vec![script.display().to_string()],
+                env: BTreeMap::new(),
+            }],
+        };
+        let manager = McpManager::from_config(&config).expect("spawn");
+        let resources = manager.all_resources();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].1.uri, "file:///hello.txt");
+        let prompts = manager.all_prompts();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].1.name, "summary");
+        let server = manager.server("full").expect("server");
+        let read = server.read_resource("file:///hello.txt").expect("read");
+        assert!(
+            read.pointer("/contents/0/text").and_then(|v| v.as_str()) == Some("hi"),
+            "expected resource text hi, got {read}"
+        );
+        let prompt = server
+            .get_prompt("summary", json!({"topic": "rust"}))
+            .expect("prompt");
+        let text = prompt
+            .pointer("/messages/0/content/text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(text.contains("rust"));
     }
 
     #[test]

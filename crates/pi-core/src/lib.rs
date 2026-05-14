@@ -484,6 +484,51 @@ pub fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
+/// RFC 4648 standard + URL-safe base64 decoder. Accepts both alphabets and
+/// ignores whitespace + `=` padding. Returns `None` on invalid characters
+/// so callers can surface a typed error.
+pub fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    const TABLE: [i16; 256] = {
+        let mut t = [-1i16; 256];
+        let mut i = 0u8;
+        while i < 26 {
+            t[(b'A' + i) as usize] = i as i16;
+            t[(b'a' + i) as usize] = (i + 26) as i16;
+            i += 1;
+        }
+        let mut j = 0u8;
+        while j < 10 {
+            t[(b'0' + j) as usize] = (j + 52) as i16;
+            j += 1;
+        }
+        t[b'+' as usize] = 62;
+        t[b'/' as usize] = 63;
+        t[b'-' as usize] = 62; // url-safe alias
+        t[b'_' as usize] = 63;
+        t
+    };
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    let mut buf = 0u32;
+    let mut bits = 0u8;
+    for &b in bytes {
+        if b == b'=' || b == b'\n' || b == b'\r' || b == b' ' || b == b'\t' {
+            continue;
+        }
+        let val = TABLE[b as usize];
+        if val < 0 {
+            return None;
+        }
+        buf = (buf << 6) | val as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xff) as u8);
+        }
+    }
+    Some(out)
+}
+
 impl Attachment {
     pub fn image_from_bytes(mime_type: impl Into<String>, bytes: &[u8]) -> Self {
         Self {

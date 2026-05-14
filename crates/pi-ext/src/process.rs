@@ -280,6 +280,11 @@ fn hostcall_target(call: &Hostcall) -> String {
         Hostcall::SessionRead { key } | Hostcall::SessionWrite { key, .. } => key.clone(),
         Hostcall::Http { url, .. } => url.clone(),
         Hostcall::UiNotify { .. } => "ui".to_string(),
+        Hostcall::ResourceList => "resources/list".to_string(),
+        Hostcall::ResourceRead { uri } => uri.clone(),
+        Hostcall::PromptList => "prompts/list".to_string(),
+        Hostcall::PromptGet { name, .. } => name.clone(),
+        Hostcall::NotifyEvent { method, .. } => method.clone(),
     }
 }
 

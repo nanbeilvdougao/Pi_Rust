@@ -89,6 +89,20 @@ pub enum Hostcall {
     SessionWrite { key: String, value: String },
     Http { method: String, url: String },
     UiNotify { message: String },
+    /// `resources/list` over the MCP fan-in.
+    ResourceList,
+    /// `resources/read` for a specific URI; the extension picks the URI.
+    ResourceRead { uri: String },
+    /// `prompts/list` for human-readable prompt templates.
+    PromptList,
+    /// `prompts/get` to materialize a prompt template into messages.
+    PromptGet { name: String, arguments: String },
+    /// Forward a guest-emitted notification (e.g. progress, log) into the
+    /// agent's event stream. The host decides whether to surface it.
+    NotifyEvent {
+        method: String,
+        params: String,
+    },
 }
 
 impl Hostcall {
@@ -98,6 +112,11 @@ impl Hostcall {
             Self::SessionRead { .. } | Self::SessionWrite { .. } => Capability::Session,
             Self::Http { .. } => Capability::Network,
             Self::UiNotify { .. } => Capability::ExtensionHostcall,
+            Self::ResourceList
+            | Self::ResourceRead { .. }
+            | Self::PromptList
+            | Self::PromptGet { .. }
+            | Self::NotifyEvent { .. } => Capability::ExtensionHostcall,
         }
     }
 }

@@ -52,6 +52,8 @@ pub const ACTIONS: &[&str] = &[
     "tree-select",
     "show-images",
     "extension-select",
+    "agent-select",
+    "mcp-select",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -151,6 +153,20 @@ impl Default for KeyBindings {
             "extension-select".into(),
             vec![KeyChord::with_mods(
                 KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+            )],
+        );
+        map.insert(
+            "agent-select".into(),
+            vec![KeyChord::with_mods(
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL,
+            )],
+        );
+        map.insert(
+            "mcp-select".into(),
+            vec![KeyChord::with_mods(
+                KeyCode::Char('s'),
                 KeyModifiers::CONTROL,
             )],
         );
