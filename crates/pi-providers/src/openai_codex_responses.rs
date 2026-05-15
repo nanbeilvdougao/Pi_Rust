@@ -168,12 +168,21 @@ impl Provider for OpenAiCodexResponsesProvider {
 }
 
 fn endpoint() -> String {
-    if let Ok(value) = env::var("OPENAI_CODEX_BASE_URL") {
-        return format!("{}/responses", value.trim_end_matches('/'));
+    // Match TS pi (`packages/ai/src/providers/openai-codex-responses.ts`) which
+    // talks to `https://chatgpt.com/backend-api/codex/responses` when no
+    // explicit base URL is set. `OPENAI_CODEX_BASE_URL` is the override hook;
+    // we suffix `/responses` (or `/codex/responses`) automatically so users
+    // can paste either form.
+    let base = env::var("OPENAI_CODEX_BASE_URL")
+        .unwrap_or_else(|_| "https://chatgpt.com/backend-api".to_string());
+    let trimmed = base.trim_end_matches('/');
+    if trimmed.ends_with("/codex/responses") {
+        return trimmed.to_string();
     }
-    let main = env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".into());
-    let main = main.trim_end_matches('/').trim_end_matches("/v1");
-    format!("{main}/codex/v1/responses")
+    if trimmed.ends_with("/codex") {
+        return format!("{trimmed}/responses");
+    }
+    format!("{trimmed}/codex/responses")
 }
 
 fn read_codex_api_key() -> PiResult<String> {
@@ -210,8 +219,13 @@ pub fn openai_codex_responses_info() -> ProviderInfo {
     ProviderInfo {
         id: "openai-codex-responses".to_string(),
         display_name: "OpenAI Codex Responses".to_string(),
-        default_model: "codex-1".to_string(),
+        default_model: "gpt-5.5".to_string(),
+        // ChatGPT-subscription / Codex tenant model IDs. The `gpt-5.5`
+        // entry matches earendil-works/pi's `openai-codex → gpt-5.5`
+        // alias so both ends accept the same `--model gpt-5.5`.
         supported_models: vec![
+            "gpt-5.5".to_string(),
+            "gpt-5".to_string(),
             "codex-1".to_string(),
             "codex-1-mini".to_string(),
             "codex-medium-latest".to_string(),

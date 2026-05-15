@@ -351,6 +351,7 @@ pub fn provider_for(selection: &ModelSelection) -> PiResult<Box<dyn Provider>> {
         "openrouter" => Ok(Box::new(OpenAiCompatibleProvider::openrouter())),
         "mistral" => Ok(Box::new(OpenAiCompatibleProvider::mistral())),
         "openai-responses" => Ok(Box::new(OpenAiResponsesProvider::new())),
+        "openai-codex-responses" => Ok(Box::new(OpenAiCodexResponsesProvider::new())),
         "vertex" => Ok(Box::new(VertexProvider::new())),
         other => Err(PiError::new(
             PiErrorKind::Provider,
