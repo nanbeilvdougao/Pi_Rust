@@ -124,12 +124,26 @@ impl Tool for TodoTool {
             input_shape: "json".to_string(),
             parameters: Some(json!({
                 "type": "object",
-                "oneOf": [
-                    {"properties": {"action": {"const": "add"}, "text": {"type": "string"}}, "required": ["action", "text"]},
-                    {"properties": {"action": {"const": "update"}, "id": {"type": "integer"}, "status": {"enum": ["pending", "in_progress", "completed"]}}, "required": ["action", "id", "status"]},
-                    {"properties": {"action": {"const": "list"}}, "required": ["action"]},
-                    {"properties": {"action": {"const": "clear"}}, "required": ["action"]}
-                ]
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "add / update / list / clear"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "新增条目的文本 (仅 action=add 必填)"
+                    },
+                    "id": {
+                        "type": "integer",
+                        "description": "条目 id (仅 action=update 必填)"
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "pending / in_progress / completed (仅 action=update 必填)"
+                    }
+                },
+                "required": ["action"],
+                "additionalProperties": false
             })),
             mutates: true,
         }
