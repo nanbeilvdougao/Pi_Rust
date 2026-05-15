@@ -24,7 +24,7 @@ use pi_core::{
     base64_decode, Message, PiError, PiErrorKind, PiResult, Role, StreamEvent, StreamSink,
     ToolInvocation, Usage,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::aws_event_stream::{parse as parse_event_stream, EventStreamMessage};
@@ -265,10 +265,7 @@ fn handle_bedrock_message(
         "content_block_start" => {
             if let Some(block) = event.get("content_block") {
                 if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                    let idx = event
-                        .get("index")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
+                    let idx = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                     let id = block
                         .get("id")
                         .and_then(|v| v.as_str())
@@ -311,17 +308,10 @@ fn handle_bedrock_message(
                         }
                     }
                     "input_json_delta" => {
-                        if let Some(partial) =
-                            delta.get("partial_json").and_then(|v| v.as_str())
-                        {
-                            let idx = event
-                                .get("index")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0) as usize;
-                            tool_input_buf
-                                .entry(idx)
-                                .or_default()
-                                .push_str(partial);
+                        if let Some(partial) = delta.get("partial_json").and_then(|v| v.as_str()) {
+                            let idx =
+                                event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                            tool_input_buf.entry(idx).or_default().push_str(partial);
                             let id = tool_index_to_id.get(&idx).cloned();
                             sink.emit(StreamEvent::ToolCallDelta {
                                 id,
@@ -473,9 +463,7 @@ fn parse_anthropic_response(text: &str) -> PiResult<ProviderResponse> {
             name: String,
             input: Value,
         },
-        Thinking {
-            thinking: String,
-        },
+        Thinking,
     }
     #[derive(Debug, Deserialize, Default)]
     struct BedrockUsage {
@@ -508,7 +496,7 @@ fn parse_anthropic_response(text: &str) -> PiResult<ProviderResponse> {
                     input: input_str,
                 });
             }
-            ContentBlock::Thinking { .. } => {}
+            ContentBlock::Thinking => {}
         }
     }
     let usage = parsed

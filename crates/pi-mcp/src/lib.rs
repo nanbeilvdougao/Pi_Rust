@@ -37,6 +37,8 @@
 //! Still out of scope: SSE transport (stdio only), HTTP transport, and the
 //! optional `logging` capability beyond capturing it in `ServerCapabilities`.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
+
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -280,11 +282,7 @@ impl McpServer {
     pub fn cancel_in_flight(&self, request_id: u64) -> PiResult<()> {
         self.cancelled
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        Self::notify(
-            &self.inner,
-            "$/cancelRequest",
-            json!({"id": request_id}),
-        )
+        Self::notify(&self.inner, "$/cancelRequest", json!({"id": request_id}))
     }
 
     /// Returns and clears the cancel flag. Used by call_tool to short-
@@ -430,19 +428,20 @@ impl McpServer {
                 let mut line = serde_json::to_string(&response_value)?;
                 line.push('\n');
                 guard.stdin.write_all(line.as_bytes()).map_err(|err| {
-                    PiError::new(PiErrorKind::Tool, format!("写入 server-request 响应失败：{err}"))
+                    PiError::new(
+                        PiErrorKind::Tool,
+                        format!("写入 server-request 响应失败：{err}"),
+                    )
                 })?;
-                guard.stdin.flush().map_err(|err| {
-                    PiError::new(PiErrorKind::Tool, format!("flush 失败：{err}"))
-                })?;
+                guard
+                    .stdin
+                    .flush()
+                    .map_err(|err| PiError::new(PiErrorKind::Tool, format!("flush 失败：{err}")))?;
                 continue;
             }
             // 2. Server-initiated notification (method, no id).
             if frame.get("method").is_some() && frame.get("id").is_none() {
-                let notif_method = frame
-                    .get("method")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let notif_method = frame.get("method").and_then(|v| v.as_str()).unwrap_or("");
                 if notif_method == "notifications/progress" {
                     if let Some(handler) = &progress {
                         handler.on_progress(
@@ -523,10 +522,9 @@ impl McpServer {
                 break;
             }
             let mut line = String::new();
-            let n = guard
-                .reader
-                .read_line(&mut line)
-                .map_err(|err| PiError::new(PiErrorKind::Tool, format!("读取 MCP 通知失败：{err}")))?;
+            let n = guard.reader.read_line(&mut line).map_err(|err| {
+                PiError::new(PiErrorKind::Tool, format!("读取 MCP 通知失败：{err}"))
+            })?;
             if n == 0 {
                 break;
             }
@@ -571,10 +569,7 @@ impl McpServer {
                 format!("MCP server {} 未声明 prompts 能力", self.id),
             ));
         }
-        self.rpc_with_handlers(
-            "prompts/get",
-            json!({"name": name, "arguments": arguments}),
-        )
+        self.rpc_with_handlers("prompts/get", json!({"name": name, "arguments": arguments}))
     }
 
     /// Run an RPC with the host's current sampling / progress / cancel
@@ -634,7 +629,10 @@ pub struct Notification {
 }
 
 fn parse_capabilities(init: &Value) -> ServerCapabilities {
-    let caps = init.pointer("/capabilities").cloned().unwrap_or(Value::Null);
+    let caps = init
+        .pointer("/capabilities")
+        .cloned()
+        .unwrap_or(Value::Null);
     ServerCapabilities {
         tools: caps.get("tools").is_some(),
         resources: caps.get("resources").is_some(),
@@ -973,9 +971,7 @@ for line in sys.stdin:
         let manager = McpManager::from_config(&config).expect("spawn");
         let server = manager.server("s").expect("server").clone();
         server.set_sampling_handler(Arc::new(EchoSampler));
-        let output = server
-            .call_tool("ask", json!({}))
-            .expect("call");
+        let output = server.call_tool("ask", json!({})).expect("call");
         assert!(output.contains("from-host"), "got: {output}");
     }
 

@@ -96,7 +96,9 @@ pub fn apply_sandbox(command: &mut Command, profile: &SandboxProfile) -> Sandbox
 }
 
 fn profile_is_empty(profile: &SandboxProfile) -> bool {
-    profile.workspace_root.is_none() && profile.extra_read_roots.is_empty() && !profile.allow_network
+    profile.workspace_root.is_none()
+        && profile.extra_read_roots.is_empty()
+        && !profile.allow_network
 }
 
 fn apply_bwrap(command: &mut Command, profile: &SandboxProfile) {

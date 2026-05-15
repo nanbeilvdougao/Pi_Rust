@@ -40,12 +40,18 @@ fn key_for(path: &Path) -> PathBuf {
     })
 }
 
-fn lock_for(path: &Path) -> Arc<Mutex<()>> {
+fn lock_for(path: &Path) -> PiResult<Arc<Mutex<()>>> {
     let key = key_for(path);
-    let mut map = registry().lock().expect("mutation registry");
-    map.entry(key)
+    let mut map = registry().lock().map_err(|err| {
+        PiError::new(
+            PiErrorKind::Tool,
+            format!("mutation registry poisoned: {err}"),
+        )
+    })?;
+    Ok(map
+        .entry(key)
         .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone()
+        .clone())
 }
 
 /// Run a critical section that owns the file at `path` for its duration.
@@ -55,7 +61,7 @@ pub fn with_path_lock<F, T>(path: &Path, f: F) -> PiResult<T>
 where
     F: FnOnce(&mut MutationGuard) -> PiResult<T>,
 {
-    let lock = lock_for(path);
+    let lock = lock_for(path)?;
     let _guard = lock
         .lock()
         .map_err(|err| PiError::new(PiErrorKind::Tool, format!("path lock poisoned: {err}")))?;

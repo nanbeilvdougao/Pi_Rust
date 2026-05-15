@@ -10,6 +10,8 @@
 //! - `--system` overrides the default system prompt.
 //! - `--export-session`, `--rename-session`, `--delete-session` are first-class.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
+
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
@@ -578,12 +580,7 @@ fn run(cli: Cli) -> PiResult<()> {
             .iter()
             .any(|m| m == &config.model.model)
     {
-        let preview: Vec<String> = info
-            .supported_models
-            .iter()
-            .take(6)
-            .cloned()
-            .collect();
+        let preview: Vec<String> = info.supported_models.iter().take(6).cloned().collect();
         let more = if info.supported_models.len() > preview.len() {
             format!("… (+{} more)", info.supported_models.len() - preview.len())
         } else {
@@ -605,7 +602,7 @@ fn run(cli: Cli) -> PiResult<()> {
     let mut agent = AgentRuntime::try_new(config.clone(), store)?;
 
     // Wire MCP servers configured in `.pi/mcp.toml` into the agent's tool runtime.
-    if let Some(root) = env::current_dir().ok() {
+    if let Ok(root) = env::current_dir() {
         if let Ok(mcp_manager) = pi_mcp::McpManager::load_workspace(&root) {
             if !mcp_manager.server_ids().is_empty() {
                 mcp_manager.register_into(agent.tools_mut());
@@ -640,9 +637,7 @@ fn run(cli: Cli) -> PiResult<()> {
     if cli.strict_sandbox {
         use pi_permissions::{landlock_supported, restrict_self, LandlockOutcome, LandlockPlan};
         if !landlock_supported() {
-            eprintln!(
-                "提示：--strict-sandbox 仅在 Linux ≥5.13 生效；当前平台不支持，已忽略。"
-            );
+            eprintln!("提示：--strict-sandbox 仅在 Linux ≥5.13 生效；当前平台不支持，已忽略。");
         } else {
             let cwd = env::current_dir().ok();
             let profile = pi_permissions::SandboxProfile {
@@ -791,9 +786,8 @@ fn print_tools() {
 }
 
 fn load_agent_profile(name: &str) -> PiResult<String> {
-    let cwd = env::current_dir().map_err(|err| {
-        PiError::new(PiErrorKind::Io, format!("无法读取 cwd：{err}"))
-    })?;
+    let cwd = env::current_dir()
+        .map_err(|err| PiError::new(PiErrorKind::Io, format!("无法读取 cwd：{err}")))?;
     let candidates = [
         cwd.join(".pi").join("agents").join(format!("{name}.md")),
         cwd.join(".pi").join("agents").join(format!("{name}.toml")),
@@ -853,7 +847,11 @@ fn print_prompts() -> PiResult<()> {
     let cwd = env::current_dir().ok();
     if let Some(root) = &cwd {
         for prompt in pi_ext::wrapper::ToolBridge::load_workspace_prompts(root) {
-            println!("local\t{}\t{}", prompt.name, prompt.description.unwrap_or_default());
+            println!(
+                "local\t{}\t{}",
+                prompt.name,
+                prompt.description.unwrap_or_default()
+            );
         }
     }
     if let Some(root) = &cwd {

@@ -103,9 +103,15 @@ impl Tool for TaskTool {
         };
         let prompt = parsed.prompt.trim().to_string();
         if prompt.is_empty() {
-            return Err(PiError::new(PiErrorKind::InvalidInput, "task prompt 不能为空"));
+            return Err(PiError::new(
+                PiErrorKind::InvalidInput,
+                "task prompt 不能为空",
+            ));
         }
-        let max_steps = parsed.max_steps.unwrap_or(DEFAULT_MAX_STEPS).min(MAX_STEP_CAP);
+        let max_steps = parsed
+            .max_steps
+            .unwrap_or(DEFAULT_MAX_STEPS)
+            .min(MAX_STEP_CAP);
         permissions.require(PermissionRequest {
             capability: Capability::ExtensionHostcall,
             target: "task:subagent".to_string(),

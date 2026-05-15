@@ -2,6 +2,8 @@
 //! to providers. The parity ledger references this benchmark as
 //! "wire_serialize".
 
+#![allow(clippy::expect_used)]
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use pi_bench::synthetic_messages;
 

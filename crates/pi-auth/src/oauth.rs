@@ -343,7 +343,7 @@ fn pkce_challenge(verifier: &str) -> String {
 
 fn base64url(bytes: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 3 <= bytes.len() {
         let chunk =
@@ -394,7 +394,7 @@ fn urldecode(input: &str) -> String {
                 let hi = (bytes[i + 1] as char).to_digit(16);
                 let lo = (bytes[i + 2] as char).to_digit(16);
                 if let (Some(hi), Some(lo)) = (hi, lo) {
-                    out.push((hi as u8 * 16 + lo as u8) as u8);
+                    out.push(hi as u8 * 16 + lo as u8);
                     i += 3;
                 } else {
                     out.push(bytes[i]);

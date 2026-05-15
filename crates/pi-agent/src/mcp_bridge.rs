@@ -54,10 +54,7 @@ impl SamplingHandler for AgentSamplingHandler {
         let mut messages: Vec<Message> = Vec::new();
         if let Some(items) = params.get("messages").and_then(|v| v.as_array()) {
             for item in items {
-                let role = item
-                    .get("role")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("user");
+                let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
                 let text = item
                     .pointer("/content/text")
                     .and_then(|v| v.as_str())
@@ -143,11 +140,7 @@ impl ProgressHandler for EventQueueProgressHandler {
                 let pct = params.get("progress").and_then(|v| v.as_f64());
                 let total = params.get("total").and_then(|v| v.as_f64());
                 match (pct, total) {
-                    (Some(p), Some(t)) if t > 0.0 => format!(
-                        "进度 {:.0}/{:.0}",
-                        p,
-                        t
-                    ),
+                    (Some(p), Some(t)) if t > 0.0 => format!("进度 {:.0}/{:.0}", p, t),
                     (Some(p), _) => format!("进度 {p:.0}"),
                     _ => "正在执行…".to_string(),
                 }

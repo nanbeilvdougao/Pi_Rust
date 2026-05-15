@@ -5,6 +5,8 @@
 //! - `truncation/head/N` — apply an N-char head/tail truncation policy.
 //! - `sse_parse/N` — parse N SSE events out of an `[N data: blocks]` body.
 
+#![allow(clippy::expect_used)]
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use pi_providers::read_sse_for_bench;
 use pi_tools::truncate::{truncate, TruncationPolicy};

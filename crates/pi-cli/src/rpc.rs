@@ -139,11 +139,7 @@ fn handle<'a>(request: &'a Request, agent: &mut AgentRuntime<JsonlSessionStore>)
                 .map(|s| s.to_string());
             let mut pairs: Vec<Value> = Vec::new();
             for info in ProviderRegistry::builtin().list() {
-                if filter
-                    .as_deref()
-                    .map(|f| info.id != f)
-                    .unwrap_or(false)
-                {
+                if filter.as_deref().map(|f| info.id != f).unwrap_or(false) {
                     continue;
                 }
                 for model in &info.supported_models {

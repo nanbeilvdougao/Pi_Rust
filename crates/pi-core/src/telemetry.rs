@@ -250,6 +250,7 @@ fn generate_uuid_v4() -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

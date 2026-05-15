@@ -127,3 +127,19 @@ Why this matters:
 
 - TUI and RPC parity need structured stream events instead of raw strings.
 - This creates a stable internal contract before implementing true network SSE.
+
+## Iteration 10
+
+Focus: turn strict Rust quality gates into a passing workspace check.
+
+Changes:
+
+- Ran and fixed `cargo clippy --workspace --all-targets -- -D warnings`.
+- Removed production clippy blockers across core, permissions, auth, tools, providers, agent, TUI, CLI, extension, MCP, and RPC crates.
+- Kept test and benchmark assertion-style `unwrap` / `expect` explicit with test-only or bench-only allow attributes.
+- Re-ran `cargo test --workspace --all-targets` after the clippy fixes.
+
+Why this matters:
+
+- A real Rust migration needs an enforceable quality bar, not only feature parity.
+- Passing strict clippy makes CI-ready regressions easier to catch as the TS parity surface keeps expanding.

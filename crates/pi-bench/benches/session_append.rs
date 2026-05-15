@@ -3,6 +3,8 @@
 //!
 //! Run: `cargo bench -p pi-bench --bench session_append`.
 
+#![allow(clippy::expect_used)]
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use pi_bench::synthetic_messages;
 use pi_session::{JsonlSessionStore, SessionStore};

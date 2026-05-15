@@ -213,10 +213,7 @@ impl RenderState {
                         }
                     }
                 };
-                let label = self
-                    .code_lang
-                    .clone()
-                    .unwrap_or_else(|| "code".to_string());
+                let label = self.code_lang.clone().unwrap_or_else(|| "code".to_string());
                 self.lines.push(Line::from(Span::styled(
                     format!("```{label}"),
                     Style::default().fg(self.theme.hint),
@@ -243,10 +240,8 @@ impl RenderState {
                 };
                 self.ensure_indent();
                 self.current.push(Span::raw(indent));
-                self.current.push(Span::styled(
-                    marker,
-                    Style::default().fg(self.theme.accent),
-                ));
+                self.current
+                    .push(Span::styled(marker, Style::default().fg(self.theme.accent)));
             }
             Tag::Emphasis => {
                 self.push_style(Style::default().add_modifier(Modifier::ITALIC));

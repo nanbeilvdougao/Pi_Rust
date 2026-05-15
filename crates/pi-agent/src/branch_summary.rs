@@ -296,12 +296,11 @@ mod tests {
 
     #[test]
     fn preserves_input_order_under_parallel_execution() {
-        let summarizer = BranchSummarizer::new(provider(), model()).with_config(
-            BranchSummarizerConfig {
+        let summarizer =
+            BranchSummarizer::new(provider(), model()).with_config(BranchSummarizerConfig {
                 max_concurrency: 4,
                 ..BranchSummarizerConfig::default()
-            },
-        );
+            });
         let branches: Vec<Branch> = (0..8)
             .map(|i| Branch {
                 id: format!("b{i}"),
@@ -347,12 +346,11 @@ mod tests {
 
     #[test]
     fn concurrency_zero_is_treated_as_one() {
-        let summarizer = BranchSummarizer::new(provider(), model()).with_config(
-            BranchSummarizerConfig {
+        let summarizer =
+            BranchSummarizer::new(provider(), model()).with_config(BranchSummarizerConfig {
                 max_concurrency: 0,
                 ..BranchSummarizerConfig::default()
-            },
-        );
+            });
         let out = summarizer.summarize(vec![Branch {
             id: "only".into(),
             messages: vec![Message::new(Role::User, "x")],

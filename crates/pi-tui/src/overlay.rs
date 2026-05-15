@@ -404,9 +404,9 @@ impl Overlay {
             Overlay::Settings(list) => handle_list(list, key, |item| {
                 OverlayOutcome::ToggleSetting(item.id.clone())
             }),
-            Overlay::Thinking(list) => {
-                handle_list(list, key, |item| OverlayOutcome::SetThinking(item.id.clone()))
-            }
+            Overlay::Thinking(list) => handle_list(list, key, |item| {
+                OverlayOutcome::SetThinking(item.id.clone())
+            }),
             Overlay::ShowImages(list) => {
                 let idx = list.selected;
                 handle_list(list, key, move |_| OverlayOutcome::RemoveImage(idx))
@@ -414,9 +414,9 @@ impl Overlay {
             Overlay::Extension(list) => handle_list(list, key, |item| {
                 OverlayOutcome::ToggleExtension(item.id.clone())
             }),
-            Overlay::Agent(list) => {
-                handle_list(list, key, |item| OverlayOutcome::SwitchAgent(item.id.clone()))
-            }
+            Overlay::Agent(list) => handle_list(list, key, |item| {
+                OverlayOutcome::SwitchAgent(item.id.clone())
+            }),
             Overlay::Mcp(list) => {
                 handle_list(list, key, |item| OverlayOutcome::ToggleMcp(item.id.clone()))
             }
@@ -469,8 +469,7 @@ fn handle_login(login: &mut LoginOverlay, key: &KeyEvent) -> OverlayOutcome {
             }
             KeyCode::Enter => {
                 if login.current().is_some() {
-                    let supports_oauth =
-                        login.current().map(|p| p.supports_oauth).unwrap_or(false);
+                    let supports_oauth = login.current().map(|p| p.supports_oauth).unwrap_or(false);
                     login.stage = if supports_oauth {
                         LoginStage::PickMethod
                     } else {
@@ -835,7 +834,10 @@ mod tests {
                 label: "Dark".into(),
             }],
         ));
-        assert_eq!(overlay.handle_key(&key(KeyCode::Esc)), OverlayOutcome::Close);
+        assert_eq!(
+            overlay.handle_key(&key(KeyCode::Esc)),
+            OverlayOutcome::Close
+        );
     }
 
     #[test]
@@ -888,10 +890,7 @@ mod tests {
             }],
         ));
         let outcome = overlay.handle_key(&key(KeyCode::Enter));
-        assert_eq!(
-            outcome,
-            OverlayOutcome::ToggleExtension("my-ext".into())
-        );
+        assert_eq!(outcome, OverlayOutcome::ToggleExtension("my-ext".into()));
     }
 
     #[test]

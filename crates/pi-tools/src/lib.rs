@@ -19,6 +19,8 @@
 //! `/tool` prompts in the CLI). This is how we keep the same code path for
 //! human-typed shortcuts and provider-driven function calls.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -1270,7 +1272,11 @@ mod tests {
                 &mut perms,
             )
             .unwrap();
-        assert!(output.output.contains("sandbox-ok"), "got: {}", output.output);
+        assert!(
+            output.output.contains("sandbox-ok"),
+            "got: {}",
+            output.output
+        );
     }
 
     #[test]

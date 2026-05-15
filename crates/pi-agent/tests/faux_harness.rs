@@ -2,6 +2,8 @@
 //! tests can drive the agent loop without hitting a real LLM. Mirrors the TS
 //! `coding-agent` harness's faux-provider tests.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::fs;
 
 use pi_agent::AgentRuntime;

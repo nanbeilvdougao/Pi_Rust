@@ -45,8 +45,7 @@ impl Tool for WebSearchTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "websearch".to_string(),
-            description: "通过 Tavily/Brave/SerpAPI 中的一个搜索引擎执行网页搜索"
-                .to_string(),
+            description: "通过 Tavily/Brave/SerpAPI 中的一个搜索引擎执行网页搜索".to_string(),
             input_shape: "json".to_string(),
             parameters: Some(json!({
                 "type": "object",
@@ -145,9 +144,7 @@ fn call_tavily(query: &str, limit: u32) -> PiResult<Vec<Hit>> {
         .post(&url)
         .set("content-type", "application/json")
         .send_json(body)
-        .map_err(|err| {
-            PiError::new(PiErrorKind::Network, format!("Tavily search 失败：{err}"))
-        })?;
+        .map_err(|err| PiError::new(PiErrorKind::Network, format!("Tavily search 失败：{err}")))?;
     let value: Value = response.into_json().map_err(|err| {
         PiError::new(PiErrorKind::Provider, format!("Tavily 响应解析失败：{err}"))
     })?;
@@ -155,8 +152,16 @@ fn call_tavily(query: &str, limit: u32) -> PiResult<Vec<Hit>> {
     if let Some(results) = value.get("results").and_then(|v| v.as_array()) {
         for item in results.iter().take(limit as usize) {
             hits.push(Hit {
-                title: item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                url: item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                title: item
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                url: item
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 snippet: item
                     .get("content")
                     .and_then(|v| v.as_str())
@@ -181,15 +186,23 @@ fn call_brave(query: &str, limit: u32) -> PiResult<Vec<Hit>> {
         .set("x-subscription-token", &key)
         .call()
         .map_err(|err| PiError::new(PiErrorKind::Network, format!("Brave search 失败：{err}")))?;
-    let value: Value = response.into_json().map_err(|err| {
-        PiError::new(PiErrorKind::Provider, format!("Brave 响应解析失败：{err}"))
-    })?;
+    let value: Value = response
+        .into_json()
+        .map_err(|err| PiError::new(PiErrorKind::Provider, format!("Brave 响应解析失败：{err}")))?;
     let mut hits = Vec::new();
     if let Some(results) = value.pointer("/web/results").and_then(|v| v.as_array()) {
         for item in results.iter().take(limit as usize) {
             hits.push(Hit {
-                title: item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                url: item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                title: item
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                url: item
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 snippet: item
                     .get("description")
                     .and_then(|v| v.as_str())
@@ -209,18 +222,30 @@ fn call_serpapi(query: &str, limit: u32) -> PiResult<Vec<Hit>> {
         limit,
         urlencode(&key),
     );
-    let response = http_agent().get(&url).call().map_err(|err| {
-        PiError::new(PiErrorKind::Network, format!("SerpAPI search 失败：{err}"))
-    })?;
+    let response = http_agent()
+        .get(&url)
+        .call()
+        .map_err(|err| PiError::new(PiErrorKind::Network, format!("SerpAPI search 失败：{err}")))?;
     let value: Value = response.into_json().map_err(|err| {
-        PiError::new(PiErrorKind::Provider, format!("SerpAPI 响应解析失败：{err}"))
+        PiError::new(
+            PiErrorKind::Provider,
+            format!("SerpAPI 响应解析失败：{err}"),
+        )
     })?;
     let mut hits = Vec::new();
     if let Some(results) = value.get("organic_results").and_then(|v| v.as_array()) {
         for item in results.iter().take(limit as usize) {
             hits.push(Hit {
-                title: item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                url: item.get("link").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                title: item
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                url: item
+                    .get("link")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 snippet: item
                     .get("snippet")
                     .and_then(|v| v.as_str())

@@ -225,10 +225,7 @@ fn init_workspace_skeleton() -> String {
     // default. The user can edit it after.
     let gitignore = root.join(".gitignore");
     if !gitignore.exists() {
-        let _ = fs::write(
-            &gitignore,
-            "todos/\nsessions/\nauth.enc\n*.local\n",
-        );
+        let _ = fs::write(&gitignore, "todos/\nsessions/\nauth.enc\n*.local\n");
         created.push(".gitignore".to_string());
     }
     // Example system.md so users discover the workspace override.
@@ -296,7 +293,14 @@ mod tests {
         std::env::set_current_dir(prev).expect("restore cwd");
         let text = outcome.assistant.expect("text");
         assert!(text.contains("工作区骨架已就绪"));
-        for sub in ["skills", "commands", "agents", "prompts", "resources", "hooks"] {
+        for sub in [
+            "skills",
+            "commands",
+            "agents",
+            "prompts",
+            "resources",
+            "hooks",
+        ] {
             let path = dir.path().join(".pi").join(sub);
             assert!(path.is_dir(), "missing dir: {}", path.display());
         }

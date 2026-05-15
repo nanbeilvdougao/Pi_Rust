@@ -21,6 +21,8 @@
 //! cleanly with CLI batch mode, an embeddable SDK, the RPC/SDK harness, and a
 //! ratatui-driven TUI thread without dragging tokio into every consumer.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -200,7 +202,7 @@ impl<S: SessionStore> AgentRuntime<S> {
         self.reset_cancel();
         self.refresh_from_watcher();
         // pre-turn hook — aborts the whole turn on non-zero exit.
-        if let Some(cwd) = std::env::current_dir().ok() {
+        if let Ok(cwd) = std::env::current_dir() {
             let ctx = hooks::HookContext {
                 session_id: session_id.to_string(),
                 prompt: Some(prompt.to_string()),
@@ -342,7 +344,7 @@ impl<S: SessionStore> AgentRuntime<S> {
                 self.session_store.append(session_id, &assistant_message)?;
                 session.push(assistant_message);
                 // post-turn hook — advisory, exit code is logged but not fatal.
-                if let Some(cwd) = std::env::current_dir().ok() {
+                if let Ok(cwd) = std::env::current_dir() {
                     let ctx = hooks::HookContext {
                         session_id: session_id.to_string(),
                         prompt: Some(prompt.to_string()),
@@ -388,7 +390,7 @@ impl<S: SessionStore> AgentRuntime<S> {
                     tool_input: Some(call.input.clone()),
                     ..hooks::HookContext::default()
                 };
-                if let Some(cwd) = std::env::current_dir().ok() {
+                if let Ok(cwd) = std::env::current_dir() {
                     let outcome = hooks::run(&cwd, hooks::HookPhase::PreTool, &hook_ctx)?;
                     if outcome.ran && outcome.aborts(hooks::HookPhase::PreTool) {
                         events.push(Event::ToolError {
@@ -429,7 +431,7 @@ impl<S: SessionStore> AgentRuntime<S> {
                         self.session_store.append(session_id, &error_message)?;
                         session.push(error_message);
                         // Still run post-tool hook on error so observers can react.
-                        if let Some(cwd) = std::env::current_dir().ok() {
+                        if let Ok(cwd) = std::env::current_dir() {
                             let mut post_ctx = hook_ctx.clone();
                             post_ctx.tool_output = Some(format!("ERROR: {err}"));
                             let _ = hooks::run(&cwd, hooks::HookPhase::PostTool, &post_ctx);
@@ -450,7 +452,7 @@ impl<S: SessionStore> AgentRuntime<S> {
                     name: output.name.clone(),
                     output: output.output.clone(),
                 });
-                if let Some(cwd) = std::env::current_dir().ok() {
+                if let Ok(cwd) = std::env::current_dir() {
                     let mut post_ctx = hook_ctx;
                     post_ctx.tool_output = Some(output.output.clone());
                     let _ = hooks::run(&cwd, hooks::HookPhase::PostTool, &post_ctx);
@@ -521,7 +523,7 @@ fn run_tool_inline<S: SessionStore>(
         tool_input: Some(call.input.clone()),
         ..hooks::HookContext::default()
     };
-    if let Some(cwd) = std::env::current_dir().ok() {
+    if let Ok(cwd) = std::env::current_dir() {
         let outcome = hooks::run(&cwd, hooks::HookPhase::PreTool, &hook_ctx)?;
         if outcome.ran && outcome.aborts(hooks::HookPhase::PreTool) {
             let err = format!(
@@ -549,7 +551,7 @@ fn run_tool_inline<S: SessionStore>(
         name: output.name.clone(),
         output: output.output.clone(),
     });
-    if let Some(cwd) = std::env::current_dir().ok() {
+    if let Ok(cwd) = std::env::current_dir() {
         let mut post_ctx = hook_ctx;
         post_ctx.tool_output = Some(output.output.clone());
         let _ = hooks::run(&cwd, hooks::HookPhase::PostTool, &post_ctx);

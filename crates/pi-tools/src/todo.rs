@@ -213,7 +213,9 @@ fn session_id() -> String {
 
 fn todo_path() -> PathBuf {
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    cwd.join(".pi").join("todos").join(format!("{}.json", session_id()))
+    cwd.join(".pi")
+        .join("todos")
+        .join(format!("{}.json", session_id()))
 }
 
 pub fn load(path: &PathBuf) -> PiResult<TodoList> {

@@ -15,6 +15,7 @@
 //! Fuzzy ranking is a subsequence matcher with two bonuses:
 //! - Word-boundary or path-separator characters score 3× a normal hit.
 //! - Earlier hits score higher than later hits.
+//!
 //! This is good enough to make `@cli/m` rank `crates/pi-cli/src/main.rs` first
 //! without pulling a third-party fuzzy crate.
 
@@ -162,7 +163,7 @@ impl Completer {
                 ));
             }
         }
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|entry| std::cmp::Reverse(entry.0));
         scored.into_iter().take(max).map(|(_, item)| item).collect()
     }
 
@@ -183,7 +184,7 @@ impl Completer {
                 ));
             }
         }
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|entry| std::cmp::Reverse(entry.0));
         scored.into_iter().take(max).map(|(_, item)| item).collect()
     }
 

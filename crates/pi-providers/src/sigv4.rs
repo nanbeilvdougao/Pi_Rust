@@ -238,7 +238,7 @@ mod tests {
         let auth = req.headers.get("authorization").expect("auth header");
         assert!(auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIA…/"));
         assert!(auth.contains("SignedHeaders="));
-        assert!(req.headers.get("x-amz-date").is_some());
+        assert!(req.headers.contains_key("x-amz-date"));
         assert!(req
             .headers
             .get("x-amz-content-sha256")

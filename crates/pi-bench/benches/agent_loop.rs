@@ -12,6 +12,8 @@
 //! bottleneck". Pi_agent_rust does not expose an equivalent harness, so
 //! `docs/evidence/comparative-bench.md` records this as a standalone metric.
 
+#![allow(clippy::expect_used)]
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use pi_agent::AgentRuntime;
 use pi_core::{AppConfig, ModelSelection};

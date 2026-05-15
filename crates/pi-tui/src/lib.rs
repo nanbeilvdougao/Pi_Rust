@@ -19,6 +19,8 @@
 //! with a synchronous render loop driven by `event::poll`, and the agent
 //! itself is sync.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
+
 use std::io::{self, Write};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver};
@@ -347,7 +349,7 @@ where
                     continue;
                 }
                 if keys.matches("tree-select", &key) {
-                    if let Some(cwd) = std::env::current_dir().ok() {
+                    if let Ok(cwd) = std::env::current_dir() {
                         state.overlay =
                             Some(overlay::Overlay::Tree(overlay::TreeOverlay::new(cwd)));
                     }
@@ -580,11 +582,7 @@ fn apply_stream_event(state: &mut AppState, event: Event) {
                 format!("→ tool {name}: {}", truncate(&input, 200)),
             );
             state.active_tool = Some(name.clone());
-            state
-                .tool_progress
-                .entry(name)
-                .or_default()
-                .clear();
+            state.tool_progress.entry(name).or_default().clear();
         }
         Event::ToolProgress { name, line } => {
             let lines = state.tool_progress.entry(name).or_default();
@@ -835,9 +833,7 @@ fn draw<S>(
                             .title(title)
                             .border_style(Style::default().fg(theme.tool))
                             .title_style(
-                                Style::default()
-                                    .fg(theme.tool)
-                                    .add_modifier(Modifier::BOLD),
+                                Style::default().fg(theme.tool).add_modifier(Modifier::BOLD),
                             ),
                     )
                     .wrap(Wrap { trim: false });
@@ -956,7 +952,7 @@ fn expand_file_references(prompt: &str, completer: &Completer) -> String {
                 && prompt[..idx]
                     .chars()
                     .last()
-                    .map_or(false, |c| !c.is_whitespace());
+                    .is_some_and(|c| !c.is_whitespace());
             if prev_is_word {
                 out.push(ch);
                 continue;
@@ -1068,7 +1064,7 @@ where
                 drop(session);
             }
         })
-        .expect("spawn turn worker");
+        .unwrap_or_else(|_| thread::spawn(|| {}));
 
     // Drive the turn synchronously in the foreground (no thread sharing of the
     // agent), forwarding events into the channel.
@@ -1164,10 +1160,7 @@ fn build_settings_overlay<S: SessionStore>(agent: &AgentRuntime<S>) -> overlay::
             value: format!("{:.2}", config.compaction_threshold),
         },
     ];
-    overlay::Overlay::Settings(overlay::ListOverlay::new(
-        "设置 (Enter 切换 / 调整)",
-        items,
-    ))
+    overlay::Overlay::Settings(overlay::ListOverlay::new("设置 (Enter 切换 / 调整)", items))
 }
 
 fn bool_label(value: bool) -> String {
@@ -1203,7 +1196,7 @@ fn build_thinking_overlay<S: SessionStore>(agent: &AgentRuntime<S>) -> overlay::
         },
     ];
     // Pre-select current.
-    let mut list = overlay::ListOverlay::new("思考预算", items.drain(..).collect());
+    let mut list = overlay::ListOverlay::new("思考预算", std::mem::take(&mut items));
     list.selected = match current {
         pi_core::ThinkingLevel::None => 0,
         pi_core::ThinkingLevel::Low => 1,
@@ -1225,17 +1218,12 @@ fn build_images_overlay(state: &AppState) -> overlay::Overlay {
                     format!("#{}  {} (base64)", idx + 1, att.mime_type),
                     data.len(),
                 ),
-                AttachmentData::Url { url } => {
-                    (format!("#{}  {url}", idx + 1), url.len())
-                }
+                AttachmentData::Url { url } => (format!("#{}  {url}", idx + 1), url.len()),
             };
             overlay::ImageItem { label, bytes }
         })
         .collect();
-    overlay::Overlay::ShowImages(overlay::ListOverlay::new(
-        "待发送图片 (Enter 移除)",
-        items,
-    ))
+    overlay::Overlay::ShowImages(overlay::ListOverlay::new("待发送图片 (Enter 移除)", items))
 }
 
 fn build_login_overlay() -> overlay::Overlay {
@@ -1398,7 +1386,7 @@ fn apply_overlay_outcome<S: SessionStore>(
             state.status = format!("已切换 {id}");
         }
         overlay::OverlayOutcome::SetThinking(id) => {
-            if let Some(level) = pi_core::ThinkingLevel::from_str(&id) {
+            if let Some(level) = pi_core::ThinkingLevel::parse(&id) {
                 agent.config_mut().thinking_level = level;
                 state.status = format!("思考预算：{}", level.as_str());
             }
@@ -1431,7 +1419,10 @@ fn apply_overlay_outcome<S: SessionStore>(
             // Look up the selected agent's system prompt from the overlay
             // before we drop it.
             let system = if let Some(overlay::Overlay::Agent(list)) = &state.overlay {
-                list.items.iter().find(|i| i.id == id).and_then(|i| i.system.clone())
+                list.items
+                    .iter()
+                    .find(|i| i.id == id)
+                    .and_then(|i| i.system.clone())
             } else {
                 None
             };

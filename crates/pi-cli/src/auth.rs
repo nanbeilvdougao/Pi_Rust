@@ -7,8 +7,8 @@ use std::time::Duration;
 pub fn run(args: &[String]) -> PiResult<()> {
     let mut resolver = layered_resolver()?;
     match args.first().map(String::as_str) {
-        Some("login") => return login(&mut resolver, &args[1..]),
-        Some("refresh") => return refresh_provider(&mut resolver, &args[1..]),
+        Some("login") => login(&mut resolver, &args[1..]),
+        Some("refresh") => refresh_provider(&mut resolver, &args[1..]),
         Some("set") => {
             let provider = args
                 .get(1)
@@ -71,7 +71,9 @@ pub fn run(args: &[String]) -> PiResult<()> {
             PiErrorKind::InvalidInput,
             format!("未知 auth 子命令：{other}。可用：login / refresh / set / remove / list"),
         )),
-        None => Err(missing_arg("用法：pi auth <login|refresh|set|remove|list> …")),
+        None => Err(missing_arg(
+            "用法：pi auth <login|refresh|set|remove|list> …",
+        )),
     }
 }
 
@@ -86,16 +88,14 @@ fn refresh_provider(resolver: &mut impl Resolver, args: &[String]) -> PiResult<(
         )
     })?;
     let refresh_env = format!("{env_name}_REFRESH");
-    let refresh_token = resolver
-        .lookup(provider, &refresh_env)?
-        .ok_or_else(|| {
-            PiError::new(
-                PiErrorKind::NotFound,
-                format!(
-                    "{refresh_env} 不在 auth 存储中。先运行 `pi auth login {provider}` 取得 token。"
-                ),
-            )
-        })?;
+    let refresh_token = resolver.lookup(provider, &refresh_env)?.ok_or_else(|| {
+        PiError::new(
+            PiErrorKind::NotFound,
+            format!(
+                "{refresh_env} 不在 auth 存储中。先运行 `pi auth login {provider}` 取得 token。"
+            ),
+        )
+    })?;
     let config = oauth_config_for(provider)?;
     let tokens = pi_auth::oauth::refresh(&config, &refresh_token)?;
     resolver.store(provider, env_name, &tokens.access_token)?;

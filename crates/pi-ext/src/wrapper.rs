@@ -26,6 +26,9 @@ use pi_tools::{ToolCall, ToolRuntime};
 use crate::process::HostcallResolver;
 use crate::Hostcall;
 
+pub type NotifySink = Arc<Mutex<Vec<String>>>;
+pub type EventSink = Arc<Mutex<Vec<(String, String)>>>;
+
 /// One entry in the resource catalogue exposed to extensions. Mirrors the
 /// MCP resource shape so an extension can also iterate `.pi/resources/*`
 /// files served by the host directly.
@@ -53,11 +56,11 @@ pub struct ToolBridge<'a> {
     pub permissions: &'a mut PermissionEngine,
     /// Optional sink for `Hostcall::UiNotify`; the agent uses this to surface
     /// extension events to the TUI.
-    pub notify_sink: Option<Arc<Mutex<Vec<String>>>>,
+    pub notify_sink: Option<NotifySink>,
     /// Optional sink for `Hostcall::NotifyEvent`; the agent forwards it into
     /// its `Event::ToolProgress` channel so the TUI streaming widget renders
     /// extension progress alongside built-in tools.
-    pub event_sink: Option<Arc<Mutex<Vec<(String, String)>>>>,
+    pub event_sink: Option<EventSink>,
     /// Optional resource catalogue (local + MCP-aggregated). Empty by
     /// default; the agent wires this on first `ResourceList` call.
     pub resources: Vec<ResourceEntry>,
@@ -167,19 +170,21 @@ impl<'a> ToolBridge<'a> {
 
 fn mime_for(path: &std::path::Path) -> Option<String> {
     let ext = path.extension()?.to_string_lossy().to_lowercase();
-    Some(match ext.as_str() {
-        "md" | "markdown" => "text/markdown",
-        "txt" => "text/plain",
-        "json" => "application/json",
-        "toml" => "application/toml",
-        "yaml" | "yml" => "application/yaml",
-        "html" | "htm" => "text/html",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "csv" => "text/csv",
-        _ => return None,
-    }
-    .to_string())
+    Some(
+        match ext.as_str() {
+            "md" | "markdown" => "text/markdown",
+            "txt" => "text/plain",
+            "json" => "application/json",
+            "toml" => "application/toml",
+            "yaml" | "yml" => "application/yaml",
+            "html" | "htm" => "text/html",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "csv" => "text/csv",
+            _ => return None,
+        }
+        .to_string(),
+    )
 }
 
 fn interpolate(template: &str, arguments: &serde_json::Value) -> String {
@@ -284,8 +289,8 @@ impl<'a> HostcallResolver for ToolBridge<'a> {
                     .iter()
                     .find(|p| p.name == *name)
                     .ok_or_else(|| format!("未知 prompt：{name}"))?;
-                let args_value: serde_json::Value = serde_json::from_str(arguments)
-                    .unwrap_or(serde_json::Value::Null);
+                let args_value: serde_json::Value =
+                    serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
                 let rendered = interpolate(&entry.template, &args_value);
                 Ok(serde_json::json!({
                     "description": entry.description,
@@ -386,11 +391,12 @@ mod tests {
     fn prompt_get_interpolates_arguments() {
         let tools = ToolRuntime::builtin();
         let mut permissions = PermissionEngine::new(PermissionMode::TrustedWorkspace);
-        let mut bridge = ToolBridge::new(&tools, &mut permissions).with_prompts(vec![PromptEntry {
-            name: "greet".into(),
-            description: Some("greet someone".into()),
-            template: "Hello {{name}}, today is {{day}}.".into(),
-        }]);
+        let mut bridge =
+            ToolBridge::new(&tools, &mut permissions).with_prompts(vec![PromptEntry {
+                name: "greet".into(),
+                description: Some("greet someone".into()),
+                template: "Hello {{name}}, today is {{day}}.".into(),
+            }]);
         let result = bridge
             .resolve(&Hostcall::PromptGet {
                 name: "greet".into(),

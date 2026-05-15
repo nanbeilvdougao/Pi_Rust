@@ -165,8 +165,8 @@ fn call_openrouter(prompt: &str, size: &str) -> PiResult<Vec<u8>> {
     let endpoint = env::var("OPENROUTER_BASE_URL")
         .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
     let url = format!("{}/images/generations", endpoint.trim_end_matches('/'));
-    let model = env::var("OPENROUTER_IMAGE_MODEL")
-        .unwrap_or_else(|_| "openrouter/sdxl".to_string());
+    let model =
+        env::var("OPENROUTER_IMAGE_MODEL").unwrap_or_else(|_| "openrouter/sdxl".to_string());
     let body = json!({
         "model": model,
         "prompt": prompt,
@@ -200,10 +200,7 @@ fn call_openrouter(prompt: &str, size: &str) -> PiResult<Vec<u8>> {
     })?;
     // Most OpenRouter image models follow OpenAI's data[0].b64_json shape;
     // some return data[0].url which we fetch on the user's behalf.
-    if let Some(b64) = value
-        .pointer("/data/0/b64_json")
-        .and_then(|v| v.as_str())
-    {
+    if let Some(b64) = value.pointer("/data/0/b64_json").and_then(|v| v.as_str()) {
         return decode_base64(b64).ok_or_else(|| {
             PiError::new(PiErrorKind::Provider, "OpenRouter 返回的 base64 解码失败")
         });

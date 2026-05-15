@@ -24,7 +24,7 @@
 //!
 //! Stdout from a hook becomes a `Event::ToolStarted{name:"hook:<phase>"}`
 //! + `Event::ToolFinished` pair so the TUI shows it inline; stderr is
-//! treated the same way but flagged as a warning.
+//!   treated the same way but flagged as a warning.
 //!
 //! Parity target: `packages/agent/src/hooks.ts`.
 
@@ -91,7 +91,11 @@ pub fn resolve(workspace: &Path, phase: HookPhase) -> Option<PathBuf> {
     let dir = workspace.join(".pi").join("hooks");
     let base = phase.slug();
     let candidates = if cfg!(target_os = "windows") {
-        vec![format!("{base}.cmd"), format!("{base}.bat"), format!("{base}.sh")]
+        vec![
+            format!("{base}.cmd"),
+            format!("{base}.bat"),
+            format!("{base}.sh"),
+        ]
     } else {
         vec![base.to_string(), format!("{base}.sh")]
     };
@@ -180,9 +184,10 @@ pub(crate) fn run_with_timeout(
     })?;
     let deadline = Instant::now() + timeout;
     let status = loop {
-        match child.try_wait().map_err(|err| {
-            PiError::new(PiErrorKind::Io, format!("hook 等待失败：{err}"))
-        })? {
+        match child
+            .try_wait()
+            .map_err(|err| PiError::new(PiErrorKind::Io, format!("hook 等待失败：{err}")))?
+        {
             Some(status) => break Some(status),
             None => {
                 if Instant::now() >= deadline {
@@ -244,8 +249,7 @@ mod tests {
     #[test]
     fn no_op_when_hook_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let outcome = run(dir.path(), HookPhase::PreTool, &HookContext::default())
-            .expect("run");
+        let outcome = run(dir.path(), HookPhase::PreTool, &HookContext::default()).expect("run");
         assert!(!outcome.ran);
         assert_eq!(outcome.exit_code, 0);
     }
@@ -254,8 +258,7 @@ mod tests {
     fn pre_tool_aborts_when_exit_nonzero() {
         let dir = tempfile::tempdir().unwrap();
         write_hook(&dir, HookPhase::PreTool, "#!/bin/sh\nexit 7\n");
-        let outcome = run(dir.path(), HookPhase::PreTool, &HookContext::default())
-            .expect("run");
+        let outcome = run(dir.path(), HookPhase::PreTool, &HookContext::default()).expect("run");
         assert!(outcome.ran);
         assert_eq!(outcome.exit_code, 7);
         assert!(outcome.aborts(HookPhase::PreTool));
@@ -265,8 +268,7 @@ mod tests {
     fn post_tool_exit_nonzero_does_not_abort() {
         let dir = tempfile::tempdir().unwrap();
         write_hook(&dir, HookPhase::PostTool, "#!/bin/sh\nexit 9\n");
-        let outcome = run(dir.path(), HookPhase::PostTool, &HookContext::default())
-            .expect("run");
+        let outcome = run(dir.path(), HookPhase::PostTool, &HookContext::default()).expect("run");
         assert!(outcome.ran);
         assert_eq!(outcome.exit_code, 9);
         assert!(!outcome.aborts(HookPhase::PostTool));
@@ -289,7 +291,11 @@ mod tests {
             },
         )
         .expect("run");
-        assert!(outcome.stdout.contains("phase=pre-tool"), "got: {}", outcome.stdout);
+        assert!(
+            outcome.stdout.contains("phase=pre-tool"),
+            "got: {}",
+            outcome.stdout
+        );
         assert!(outcome.stdout.contains("tool=read"));
     }
 
@@ -302,11 +308,7 @@ mod tests {
         // A pre-tool script that sleeps 120s. Our timeout is 30s, but for
         // the test we exercise the cancel branch by directly invoking with
         // a hook that exits 1 immediately when SIGTERM is received.
-        write_hook(
-            &dir,
-            HookPhase::PreTool,
-            "#!/bin/sh\nsleep 120\nexit 0\n",
-        );
+        write_hook(&dir, HookPhase::PreTool, "#!/bin/sh\nsleep 120\nexit 0\n");
         // Use a custom internal helper to avoid waiting 30s in the test.
         let start = std::time::Instant::now();
         let outcome = run_with_timeout(

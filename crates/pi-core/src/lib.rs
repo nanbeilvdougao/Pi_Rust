@@ -1,4 +1,5 @@
 use std::fmt;
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -247,7 +248,7 @@ impl ThinkingLevel {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "none" | "off" | "" => Some(Self::None),
             "low" => Some(Self::Low),
@@ -255,6 +256,14 @@ impl ThinkingLevel {
             "high" => Some(Self::High),
             _ => None,
         }
+    }
+}
+
+impl FromStr for ThinkingLevel {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or(())
     }
 }
 
@@ -294,32 +303,22 @@ impl Default for AppConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Locale {
+    #[default]
     ZhCn,
     En,
 }
 
-impl Default for Locale {
-    fn default() -> Self {
-        Self::ZhCn
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PermissionModeKind {
     ReadOnly,
+    #[default]
     ConfirmMutations,
     TrustedWorkspace,
     Plan,
-}
-
-impl Default for PermissionModeKind {
-    fn default() -> Self {
-        Self::ConfirmMutations
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -456,7 +455,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// the `base64` crate. RFC 4648 standard alphabet, no line wrapping.
 pub fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 3 <= bytes.len() {
         let chunk =
@@ -608,8 +607,8 @@ pub fn estimate_tokens(text: &str) -> u32 {
     // 1 token ≈ 4 chars for English; 1 token ≈ 1.5 chars for CJK. Take the
     // worst-case of the two for safety.
     let chars = text.chars().count();
-    let by_chars = (chars + 3) / 4;
-    let by_cjk = (chars * 2 + 2) / 3;
+    let by_chars = chars.div_ceil(4);
+    let by_cjk = (chars * 2).div_ceil(3);
     by_chars.max(by_cjk) as u32
 }
 
@@ -621,6 +620,7 @@ pub fn estimate_messages_tokens(messages: &[Message]) -> u32 {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

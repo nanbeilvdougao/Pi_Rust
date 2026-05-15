@@ -15,6 +15,8 @@
 //! host can be added later behind a feature flag without changing the manifest
 //! format or the hostcall surface.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
+
 use std::path::{Path, PathBuf};
 
 use pi_permissions::Capability;
@@ -84,19 +86,37 @@ pub enum ExtensionEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Hostcall {
-    Tool { name: String, input: String },
-    SessionRead { key: String },
-    SessionWrite { key: String, value: String },
-    Http { method: String, url: String },
-    UiNotify { message: String },
+    Tool {
+        name: String,
+        input: String,
+    },
+    SessionRead {
+        key: String,
+    },
+    SessionWrite {
+        key: String,
+        value: String,
+    },
+    Http {
+        method: String,
+        url: String,
+    },
+    UiNotify {
+        message: String,
+    },
     /// `resources/list` over the MCP fan-in.
     ResourceList,
     /// `resources/read` for a specific URI; the extension picks the URI.
-    ResourceRead { uri: String },
+    ResourceRead {
+        uri: String,
+    },
     /// `prompts/list` for human-readable prompt templates.
     PromptList,
     /// `prompts/get` to materialize a prompt template into messages.
-    PromptGet { name: String, arguments: String },
+    PromptGet {
+        name: String,
+        arguments: String,
+    },
     /// Forward a guest-emitted notification (e.g. progress, log) into the
     /// agent's event stream. The host decides whether to surface it.
     NotifyEvent {

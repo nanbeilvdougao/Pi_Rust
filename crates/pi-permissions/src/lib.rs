@@ -13,6 +13,8 @@
 //! 3. **Dangerous target list** — pattern blocklist (e.g. `rm -rf /`).
 //! 4. **Audit log** — every decision is appended; UIs can render this.
 
+use std::str::FromStr;
+
 use pi_core::{PiError, PiErrorKind, PiResult};
 use serde::{Deserialize, Serialize};
 
@@ -50,7 +52,7 @@ impl Capability {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "read_file" => Self::ReadFile,
             "write_file" => Self::WriteFile,
@@ -77,6 +79,14 @@ impl Capability {
                 | Self::Network
                 | Self::BindSocket
         )
+    }
+}
+
+impl FromStr for Capability {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value).ok_or(())
     }
 }
 
@@ -219,7 +229,7 @@ impl PermissionEngine {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SandboxProfile {
     #[serde(default)]
     pub workspace_root: Option<String>,
@@ -227,16 +237,6 @@ pub struct SandboxProfile {
     pub extra_read_roots: Vec<String>,
     #[serde(default)]
     pub allow_network: bool,
-}
-
-impl Default for SandboxProfile {
-    fn default() -> Self {
-        Self {
-            workspace_root: None,
-            extra_read_roots: Vec::new(),
-            allow_network: false,
-        }
-    }
 }
 
 impl SandboxProfile {

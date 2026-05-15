@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)]
+
 use pi_providers::ProviderRegistry;
 
 #[test]

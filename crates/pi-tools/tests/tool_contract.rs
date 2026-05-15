@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)]
+
 use pi_permissions::{PermissionEngine, PermissionMode};
 use pi_tools::{ToolCall, ToolRuntime};
 

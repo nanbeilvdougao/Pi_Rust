@@ -13,6 +13,8 @@
 //!   becomes `_`. This is the defense in depth against `../` traversal on top
 //!   of `ensure_safe_session_path`.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
+
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -175,7 +177,10 @@ impl SessionStore for InMemorySessionStore {
             .inner
             .lock()
             .map_err(|err| PiError::new(PiErrorKind::Session, format!("锁失败：{err}")))?;
-        guard.entry(id.to_string()).or_default().push(message.clone());
+        guard
+            .entry(id.to_string())
+            .or_default()
+            .push(message.clone());
         Ok(())
     }
 }

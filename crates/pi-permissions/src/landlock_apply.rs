@@ -156,16 +156,10 @@ pub fn restrict_self(plan: &LandlockPlan) -> LandlockOutcome {
     match created.restrict_self() {
         Ok(status) => match status.ruleset {
             RulesetStatus::FullyEnforced => LandlockOutcome::Applied {
-                compatibility: format!(
-                    "FullyEnforced (no_new_privs={})",
-                    status.no_new_privs
-                ),
+                compatibility: format!("FullyEnforced (no_new_privs={})", status.no_new_privs),
             },
             RulesetStatus::PartiallyEnforced => LandlockOutcome::Applied {
-                compatibility: format!(
-                    "PartiallyEnforced (no_new_privs={})",
-                    status.no_new_privs
-                ),
+                compatibility: format!("PartiallyEnforced (no_new_privs={})", status.no_new_privs),
             },
             RulesetStatus::NotEnforced => LandlockOutcome::NotApplied {
                 reason: "kernel 拒绝执行 ruleset (LANDLOCK_NOT_ENFORCED)".into(),

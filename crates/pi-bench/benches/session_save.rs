@@ -5,6 +5,8 @@
 //! that's the apples-to-apples for a real `pi --resume` use case. Numbers
 //! land in `docs/evidence/comparative-bench.md`.
 
+#![allow(clippy::expect_used)]
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use pi_bench::synthetic_messages;
 use pi_session::{JsonlSessionStore, SessionStore};

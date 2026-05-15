@@ -46,22 +46,21 @@ fn build_codex_body(request: &ProviderRequest, stream: bool) -> Value {
     // Pull the first system message out of `input`.
     let mut instructions: Option<String> = None;
     if let Some(input) = body.get_mut("input").and_then(|v| v.as_array_mut()) {
-        if let Some(idx) = input.iter().position(|item| {
-            item.get("role").and_then(|v| v.as_str()) == Some("system")
-        }) {
+        if let Some(idx) = input
+            .iter()
+            .position(|item| item.get("role").and_then(|v| v.as_str()) == Some("system"))
+        {
             let removed = input.remove(idx);
-            instructions = removed
-                .get("content")
-                .and_then(|v| match v {
-                    Value::String(s) => Some(s.clone()),
-                    Value::Array(arr) => Some(
-                        arr.iter()
-                            .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
-                            .collect::<Vec<_>>()
-                            .join(""),
-                    ),
-                    _ => None,
-                });
+            instructions = removed.get("content").and_then(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                Value::Array(arr) => Some(
+                    arr.iter()
+                        .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(""),
+                ),
+                _ => None,
+            });
         }
     }
     let instructions = instructions
@@ -71,10 +70,7 @@ fn build_codex_body(request: &ProviderRequest, stream: bool) -> Value {
         obj.insert("instructions".to_string(), Value::String(instructions));
         obj.insert("store".to_string(), Value::Bool(false));
         // Codex-only extras (match earendil-works/pi packages/ai/.../openai-codex-responses.ts).
-        obj.insert(
-            "text".to_string(),
-            json!({"verbosity": "low"}),
-        );
+        obj.insert("text".to_string(), json!({"verbosity": "low"}));
         obj.insert(
             "include".to_string(),
             json!(["reasoning.encrypted_content"]),
@@ -302,7 +298,10 @@ mod tests {
     fn info_advertises_codex_id() {
         let info = openai_codex_responses_info();
         assert_eq!(info.id, "openai-codex-responses");
-        assert!(info.supported_models.iter().any(|m| m.starts_with("codex-")));
+        assert!(info
+            .supported_models
+            .iter()
+            .any(|m| m.starts_with("codex-")));
     }
 
     #[test]

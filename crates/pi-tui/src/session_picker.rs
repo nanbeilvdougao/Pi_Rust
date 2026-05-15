@@ -42,7 +42,7 @@ pub enum PickResult {
 pub fn pick(store: &JsonlSessionStore) -> io::Result<PickResult> {
     let sessions = store
         .list()
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+        .map_err(|err| io::Error::other(err.to_string()))?;
     if sessions.is_empty() {
         return Ok(PickResult::NewSession);
     }
@@ -117,16 +117,8 @@ fn render_loop<B: ratatui::backend::Backend>(
         if event::poll(Duration::from_millis(100))? {
             if let CrosstermEvent::Key(key) = event::read()? {
                 match key.code {
-                    KeyCode::Up => {
-                        if selected > 0 {
-                            selected -= 1;
-                        }
-                    }
-                    KeyCode::Down => {
-                        if selected + 1 < sessions.len() {
-                            selected += 1;
-                        }
-                    }
+                    KeyCode::Up => selected = selected.saturating_sub(1),
+                    KeyCode::Down if selected + 1 < sessions.len() => selected += 1,
                     KeyCode::Home => selected = 0,
                     KeyCode::End => selected = sessions.len().saturating_sub(1),
                     KeyCode::Enter => {

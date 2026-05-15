@@ -51,8 +51,7 @@ impl Tool for WebFetchTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "webfetch".to_string(),
-            description: "通过 HTTPS GET 抓取一个 URL，HTML 会被简化成 markdown 摘要"
-                .to_string(),
+            description: "通过 HTTPS GET 抓取一个 URL，HTML 会被简化成 markdown 摘要".to_string(),
             input_shape: "json".to_string(),
             parameters: Some(json!({
                 "type": "object",
@@ -80,7 +79,10 @@ impl Tool for WebFetchTool {
         };
         let url = parsed.url.trim().to_string();
         if url.is_empty() {
-            return Err(PiError::new(PiErrorKind::InvalidInput, "webfetch url 不能为空"));
+            return Err(PiError::new(
+                PiErrorKind::InvalidInput,
+                "webfetch url 不能为空",
+            ));
         }
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Err(PiError::new(
@@ -135,9 +137,7 @@ impl Tool for WebFetchTool {
         let mut bytes: Vec<u8> = Vec::new();
         reader
             .read_to_end(&mut bytes)
-            .map_err(|err| {
-                PiError::new(PiErrorKind::Io, format!("webfetch 读取失败：{err}"))
-            })?;
+            .map_err(|err| PiError::new(PiErrorKind::Io, format!("webfetch 读取失败：{err}")))?;
         let truncated = bytes.len() as u64 > max_bytes;
         if bytes.len() as u64 > max_bytes {
             bytes.truncate(max_bytes as usize);
@@ -229,9 +229,11 @@ pub(crate) fn html_to_markdown(html: &str) -> String {
                 out.push_str("\n\n#### ");
             } else if lower.starts_with("li") {
                 out.push_str("\n- ");
-            } else if lower.starts_with("br") {
-                out.push('\n');
-            } else if lower == "/p" || lower.starts_with("/h") || lower == "/li" {
+            } else if lower.starts_with("br")
+                || lower == "/p"
+                || lower.starts_with("/h")
+                || lower == "/li"
+            {
                 out.push('\n');
             } else if lower.starts_with("p") {
                 out.push_str("\n\n");
@@ -260,10 +262,7 @@ pub(crate) fn html_to_markdown(html: &str) -> String {
 }
 
 fn flush_text(buf: &mut String, out: &mut String) {
-    let trimmed: String = buf
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let trimmed: String = buf.split_whitespace().collect::<Vec<_>>().join(" ");
     if !trimmed.is_empty() {
         if !out.ends_with(' ') && !out.ends_with('\n') && !out.is_empty() {
             out.push(' ');

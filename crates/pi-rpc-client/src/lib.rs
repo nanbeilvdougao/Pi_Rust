@@ -22,6 +22,8 @@
 //!
 //! Parity target: `packages/agent/src/sdk/rpc-client.ts`.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
+
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -274,11 +276,7 @@ impl PiRpcClient {
 
     fn call(&mut self, method: &str, params: Value) -> Result<Value, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let request = RpcRequest {
-            id,
-            method,
-            params,
-        };
+        let request = RpcRequest { id, method, params };
         let line = serde_json::to_string(&request)?;
         self.stdin.write_all(line.as_bytes())?;
         self.stdin.write_all(b"\n")?;

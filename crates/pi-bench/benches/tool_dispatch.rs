@@ -2,6 +2,8 @@
 //! execute the tool, return output. Mirrors pi_agent_rust's `tools` bench
 //! family (truncation/sse) for a comparable "hot tool path" metric.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use pi_permissions::{PermissionEngine, PermissionMode};
 use pi_tools::{ToolCall, ToolRuntime};

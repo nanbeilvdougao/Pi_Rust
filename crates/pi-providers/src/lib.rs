@@ -13,6 +13,8 @@
 //! - HTTP transport is `ureq` with native-tls. We deliberately avoid pulling
 //!   tokio so the agent loop stays synchronous and the binary stays small.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
+
 use std::collections::BTreeMap;
 use std::env;
 use std::io::{BufRead, BufReader, Read};
@@ -291,7 +293,10 @@ impl ProviderRegistry {
 
 use std::sync::{Arc, RwLock};
 
-static TEST_PROVIDERS: once_cell_shim::Lazy<RwLock<Vec<(String, Arc<dyn Provider>)>>> =
+type TestProviderEntry = (String, Arc<dyn Provider>);
+type TestProviderRegistry = RwLock<Vec<TestProviderEntry>>;
+
+static TEST_PROVIDERS: once_cell_shim::Lazy<TestProviderRegistry> =
     once_cell_shim::Lazy::new(|| RwLock::new(Vec::new()));
 
 /// Register a fully constructed provider under a custom id so the agent can

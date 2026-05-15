@@ -416,9 +416,7 @@ mod tests {
         combined.extend_from_slice(&m3);
         let mut events = Vec::new();
         parse(std::io::Cursor::new(combined), |msg| {
-            events.push(
-                msg.header(":event-type").unwrap_or_default().to_string(),
-            );
+            events.push(msg.header(":event-type").unwrap_or_default().to_string());
             Ok(())
         })
         .expect("parse");

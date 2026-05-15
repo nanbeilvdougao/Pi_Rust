@@ -7,6 +7,8 @@
 //! abstractions differ (faux provider vs. TS mock, ratatui vs. ink). What
 //! we preserve is the user-visible invariant the upstream test guards.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::fs;
 use std::path::PathBuf;
 

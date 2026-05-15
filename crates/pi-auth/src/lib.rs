@@ -21,6 +21,8 @@
 //! and writes the credential; `pi auth list` shows names only; the runtime
 //! `Resolver::lookup` is the read path.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
