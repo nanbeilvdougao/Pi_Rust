@@ -33,6 +33,59 @@ use crate::{
     http_agent, post_json, post_sse_lines, text_stream_events, tool_call_stream_events, Provider,
     ProviderInfo, ProviderRequest, ProviderResponse,
 };
+use serde_json::json;
+
+/// Codex requires `instructions` as a top-level field plus `store: false`
+/// (the subscription tenant doesn't keep responses on its side). Take the
+/// generic openai_responses body and move the system message out of the
+/// `input` array into the `instructions` slot. Also mirror the extras TS
+/// pi sends (text.verbosity, include reasoning, parallel tool calls) so
+/// the upstream contract matches.
+fn build_codex_body(request: &ProviderRequest, stream: bool) -> Value {
+    let mut body = build_request_body_pub(request, stream);
+    // Pull the first system message out of `input`.
+    let mut instructions: Option<String> = None;
+    if let Some(input) = body.get_mut("input").and_then(|v| v.as_array_mut()) {
+        if let Some(idx) = input.iter().position(|item| {
+            item.get("role").and_then(|v| v.as_str()) == Some("system")
+        }) {
+            let removed = input.remove(idx);
+            instructions = removed
+                .get("content")
+                .and_then(|v| match v {
+                    Value::String(s) => Some(s.clone()),
+                    Value::Array(arr) => Some(
+                        arr.iter()
+                            .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
+                            .collect::<Vec<_>>()
+                            .join(""),
+                    ),
+                    _ => None,
+                });
+        }
+    }
+    let instructions = instructions
+        .or_else(|| request.system_prompt.clone())
+        .unwrap_or_else(|| "You are a helpful assistant.".to_string());
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("instructions".to_string(), Value::String(instructions));
+        obj.insert("store".to_string(), Value::Bool(false));
+        // Codex-only extras (match earendil-works/pi packages/ai/.../openai-codex-responses.ts).
+        obj.insert(
+            "text".to_string(),
+            json!({"verbosity": "low"}),
+        );
+        obj.insert(
+            "include".to_string(),
+            json!(["reasoning.encrypted_content"]),
+        );
+        if obj.contains_key("tools") {
+            obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));
+            obj.insert("parallel_tool_calls".to_string(), Value::Bool(true));
+        }
+    }
+    body
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct OpenAiCodexResponsesProvider;
@@ -51,7 +104,7 @@ impl Provider for OpenAiCodexResponsesProvider {
     fn complete(&self, request: ProviderRequest) -> PiResult<ProviderResponse> {
         let key = read_codex_api_key()?;
         let url = endpoint();
-        let body = build_request_body_pub(&request, false);
+        let body = build_codex_body(&request, false);
         let auth = format!("Bearer {key}");
         let response = post_json(
             &http_agent(),
@@ -69,7 +122,7 @@ impl Provider for OpenAiCodexResponsesProvider {
     ) -> PiResult<ProviderResponse> {
         let key = read_codex_api_key()?;
         let url = endpoint();
-        let body = build_request_body_pub(&request, true);
+        let body = build_codex_body(&request, true);
         let auth = format!("Bearer {key}");
 
         sink.emit(StreamEvent::MessageStart)?;
@@ -261,11 +314,35 @@ mod tests {
             },
             vec![Message::new(Role::User, "请写一个 fizzbuzz")],
         );
-        let body = build_request_body_pub(&req, true);
+        let body = build_codex_body(&req, true);
         assert_eq!(body["stream"], true);
         assert_eq!(body["model"], "codex-1");
         assert!(body["input"].is_array());
         assert!(body.get("messages").is_none());
+        // Codex contract: instructions top-level, store=false, text.verbosity.
+        assert!(body["instructions"].is_string());
+        assert_eq!(body["store"], false);
+        assert!(body["text"]["verbosity"].is_string());
+    }
+
+    #[test]
+    fn codex_body_lifts_system_prompt_into_instructions() {
+        let mut req = ProviderRequest::new(
+            ModelSelection {
+                provider: "openai-codex-responses".into(),
+                model: "gpt-5.5".into(),
+            },
+            vec![Message::new(Role::User, "hello")],
+        );
+        req.system_prompt = Some("you are codex".to_string());
+        let body = build_codex_body(&req, false);
+        assert_eq!(body["instructions"], "you are codex");
+        // No system message should remain in input.
+        let inputs = body["input"].as_array().expect("input array");
+        let has_system = inputs
+            .iter()
+            .any(|item| item.get("role").and_then(|v| v.as_str()) == Some("system"));
+        assert!(!has_system, "system message must be lifted to instructions");
     }
 
     #[test]
