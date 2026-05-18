@@ -72,6 +72,7 @@ pub fn env_for_provider(provider: &str) -> Option<&'static str> {
         "zhipu" => "ZHIPU_API_KEY",
         "minimax" => "MINIMAX_API_KEY",
         "gemini" => "GEMINI_API_KEY",
+        "openai-codex" | "openai-codex-responses" => "OPENAI_CODEX_ACCESS_TOKEN",
         _ => return None,
     })
 }

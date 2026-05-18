@@ -2,24 +2,26 @@
 //!
 //! Same wire shape as the regular Responses API (`POST /responses` with
 //! `input` array + typed SSE events) but rooted at the Codex base path. The
-//! Codex models (`codex-1-mini`, `codex-1`, …) are billed and tracked
-//! separately from the standard OpenAI tenant, and the surface intentionally
-//! omits a few "research" fields. We delegate the body building and parsing
-//! to `openai_responses` so the two providers cannot drift.
+//! Codex models (`gpt-5.5`, `codex-1-mini`, …) are billed and tracked
+//! separately from the standard OpenAI API tenant. The default path uses the
+//! ChatGPT subscription backend and therefore requires ChatGPT OAuth tokens,
+//! not a regular `OPENAI_API_KEY`.
 //!
 //! Auth precedence:
-//! 1. `OPENAI_CODEX_API_KEY` — codex-tenant key, preferred when set.
-//! 2. `OPENAI_API_KEY` — falls back so users who only have the main key can
-//!    still try codex models.
+//! 1. `OPENAI_CODEX_API_KEY` / `OPENAI_CODEX_ACCESS_TOKEN` — explicit bearer
+//!    override for debugging.
+//! 2. `pi auth login openai-codex` credentials stored in `~/.pi-rust/auth.enc`.
+//! 3. Existing upstream TypeScript pi OAuth credentials in
+//!    `~/.pi/agent/auth.json`.
 //!
 //! Base URL precedence:
 //! 1. `OPENAI_CODEX_BASE_URL`
-//! 2. `OPENAI_BASE_URL` + `/codex` suffix
-//! 3. `https://api.openai.com/codex/v1`
+//! 2. `https://chatgpt.com/backend-api`
 //!
 //! Parity target: `packages/ai/src/providers/openai-codex-responses.ts`.
 
-use std::env;
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{env, fs};
 
 use pi_core::{
     Message, PiError, PiErrorKind, PiResult, Role, StreamEvent, StreamSink, ToolInvocation, Usage,
@@ -34,6 +36,26 @@ use crate::{
     ProviderInfo, ProviderRequest, ProviderResponse,
 };
 use serde_json::json;
+
+const CODEX_PROVIDER_ID: &str = "openai-codex";
+const CODEX_ACCESS_ENV: &str = "OPENAI_CODEX_ACCESS_TOKEN";
+const CODEX_REFRESH_ENV: &str = "OPENAI_CODEX_ACCESS_TOKEN_REFRESH";
+const CODEX_EXPIRES_ENV: &str = "OPENAI_CODEX_ACCESS_TOKEN_EXPIRES_AT";
+const CODEX_ACCOUNT_ENV: &str = "OPENAI_CODEX_ACCOUNT_ID";
+
+#[derive(Debug, Clone)]
+struct CodexAuth {
+    access_token: String,
+    account_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct StoredCodexAuth {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_at_unix: Option<u64>,
+    account_id: Option<String>,
+}
 
 /// Codex requires `instructions` as a top-level field plus `store: false`
 /// (the subscription tenant doesn't keep responses on its side). Take the
@@ -98,16 +120,12 @@ impl Provider for OpenAiCodexResponsesProvider {
     }
 
     fn complete(&self, request: ProviderRequest) -> PiResult<ProviderResponse> {
-        let key = read_codex_api_key()?;
+        let auth = resolve_codex_auth()?;
         let url = endpoint();
         let body = build_codex_body(&request, false);
-        let auth = format!("Bearer {key}");
-        let response = post_json(
-            &http_agent(),
-            &url,
-            &body,
-            &[("authorization", auth.as_str())],
-        )?;
+        let headers = codex_headers(&auth);
+        let header_refs = header_refs(&headers);
+        let response = post_json(&http_agent(), &url, &body, &header_refs)?;
         parse_response_pub(response)
     }
 
@@ -116,10 +134,11 @@ impl Provider for OpenAiCodexResponsesProvider {
         request: ProviderRequest,
         sink: &mut dyn StreamSink,
     ) -> PiResult<ProviderResponse> {
-        let key = read_codex_api_key()?;
+        let auth = resolve_codex_auth()?;
         let url = endpoint();
         let body = build_codex_body(&request, true);
-        let auth = format!("Bearer {key}");
+        let headers = codex_headers(&auth);
+        let header_refs = header_refs(&headers);
 
         sink.emit(StreamEvent::MessageStart)?;
         let mut text_buf = String::new();
@@ -127,68 +146,91 @@ impl Provider for OpenAiCodexResponsesProvider {
         let mut usage = Usage::default();
         let mut errored: Option<PiError> = None;
 
-        post_sse_lines(
-            &http_agent(),
-            &url,
-            &body,
-            &[("authorization", auth.as_str())],
-            |line| {
-                if sink.cancelled() {
-                    return Err(PiError::new(PiErrorKind::Cancelled, "已取消"));
+        post_sse_lines(&http_agent(), &url, &body, &header_refs, |line| {
+            if sink.cancelled() {
+                return Err(PiError::new(PiErrorKind::Cancelled, "已取消"));
+            }
+            let value: Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(err) => {
+                    errored = Some(PiError::new(
+                        PiErrorKind::Provider,
+                        format!("Codex Responses 流式块解析失败：{err}; chunk={line}"),
+                    ));
+                    return Ok(());
                 }
-                let value: Value = match serde_json::from_str(line) {
-                    Ok(v) => v,
-                    Err(err) => {
-                        errored = Some(PiError::new(
-                            PiErrorKind::Provider,
-                            format!("Codex Responses 流式块解析失败：{err}; chunk={line}"),
-                        ));
-                        return Ok(());
-                    }
-                };
-                let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                match event_type {
-                    "response.output_text.delta" => {
-                        if let Some(delta) = value.get("delta").and_then(|v| v.as_str()) {
-                            if !delta.is_empty() {
-                                text_buf.push_str(delta);
-                                sink.emit(StreamEvent::TextDelta(delta.to_string()))?;
-                            }
+            };
+            let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match event_type {
+                "response.output_text.delta" => {
+                    if let Some(delta) = value.get("delta").and_then(|v| v.as_str()) {
+                        if !delta.is_empty() {
+                            text_buf.push_str(delta);
+                            sink.emit(StreamEvent::TextDelta(delta.to_string()))?;
                         }
                     }
-                    "response.reasoning_summary_text.delta" => {
-                        if let Some(delta) = value.get("delta").and_then(|v| v.as_str()) {
-                            sink.emit(StreamEvent::ThinkingDelta(delta.to_string()))?;
-                        }
-                    }
-                    "response.output_item.added" => {
-                        if let Some(item) = value.get("item") {
-                            if item.get("type").and_then(|v| v.as_str()) == Some("function_call") {
-                                let call = parse_function_call_pub(item);
-                                if !call.name.is_empty() {
-                                    sink.emit(StreamEvent::ToolCallDelta {
-                                        id: call.id.clone(),
-                                        name: Some(call.name.clone()),
-                                        input_delta: call.input.clone(),
-                                    })?;
-                                    tool_calls.push(call);
-                                }
-                            }
-                        }
-                    }
-                    "response.completed" => {
-                        if let Some(response) = value.get("response") {
-                            if let Some(u) = response.get("usage") {
-                                usage = parse_usage_pub(u);
-                                sink.emit(StreamEvent::UsageDelta(usage.clone()))?;
-                            }
-                        }
-                    }
-                    _ => {}
                 }
-                Ok(())
-            },
-        )?;
+                "response.reasoning_summary_text.delta" => {
+                    if let Some(delta) = value.get("delta").and_then(|v| v.as_str()) {
+                        sink.emit(StreamEvent::ThinkingDelta(delta.to_string()))?;
+                    }
+                }
+                "response.output_item.added" => {
+                    if let Some(item) = value.get("item") {
+                        if item.get("type").and_then(|v| v.as_str()) == Some("function_call") {
+                            let call = parse_function_call_pub(item);
+                            if !call.name.is_empty() {
+                                sink.emit(StreamEvent::ToolCallDelta {
+                                    id: call.id.clone(),
+                                    name: Some(call.name.clone()),
+                                    input_delta: call.input.clone(),
+                                })?;
+                                tool_calls.push(call);
+                            }
+                        }
+                    }
+                }
+                "response.function_call_arguments.delta" => {
+                    if let Some(delta) = value.get("delta").and_then(|v| v.as_str()) {
+                        if let Some(call) = find_tool_call_mut(&mut tool_calls, &value) {
+                            call.input.push_str(delta);
+                            sink.emit(StreamEvent::ToolCallDelta {
+                                id: call.id.clone(),
+                                name: None,
+                                input_delta: delta.to_string(),
+                            })?;
+                        }
+                    }
+                }
+                "response.function_call_arguments.done" => {
+                    if let Some(arguments) = value.get("arguments").and_then(|v| v.as_str()) {
+                        if let Some(call) = find_tool_call_mut(&mut tool_calls, &value) {
+                            call.input = normalize_tool_arguments(arguments);
+                        }
+                    }
+                }
+                "response.output_item.done" => {
+                    if let Some(item) = value.get("item") {
+                        if item.get("type").and_then(|v| v.as_str()) == Some("function_call") {
+                            let call = parse_function_call_pub(item);
+                            if !call.name.is_empty() {
+                                upsert_tool_call(&mut tool_calls, call);
+                            }
+                        }
+                    }
+                }
+                "response.completed" => {
+                    if let Some(response) = value.get("response") {
+                        if let Some(u) = response.get("usage") {
+                            usage = parse_usage_pub(u);
+                            sink.emit(StreamEvent::UsageDelta(usage.clone()))?;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        })?;
         sink.emit(StreamEvent::MessageDone)?;
         if let Some(err) = errored {
             return Err(err);
@@ -234,34 +276,276 @@ fn endpoint() -> String {
     format!("{trimmed}/codex/responses")
 }
 
-fn read_codex_api_key() -> PiResult<String> {
-    if let Ok(value) = env::var("OPENAI_CODEX_API_KEY") {
-        if !value.is_empty() {
-            return Ok(value);
-        }
-    }
-    if let Ok(value) = env::var("OPENAI_API_KEY") {
-        if !value.is_empty() {
-            return Ok(value);
-        }
-    }
-    use pi_auth::Resolver;
-    let resolver = pi_auth::layered_resolver()?;
-    for env_name in ["OPENAI_CODEX_API_KEY", "OPENAI_API_KEY"] {
-        if let Some(value) = resolver
-            .lookup("openai-codex-responses", env_name)
-            .ok()
-            .flatten()
+fn find_tool_call_mut<'a>(
+    tool_calls: &'a mut Vec<ToolInvocation>,
+    event: &Value,
+) -> Option<&'a mut ToolInvocation> {
+    let event_id = event
+        .get("call_id")
+        .or_else(|| event.get("item_id"))
+        .or_else(|| event.get("id"))
+        .and_then(|v| v.as_str());
+    if let Some(id) = event_id {
+        if let Some(idx) = tool_calls
+            .iter()
+            .position(|call| call.id.as_deref() == Some(id))
         {
-            if !value.is_empty() {
-                return Ok(value);
-            }
+            return tool_calls.get_mut(idx);
         }
     }
-    Err(PiError::new(
-        PiErrorKind::Provider,
-        "缺少 OPENAI_CODEX_API_KEY 或 OPENAI_API_KEY (Codex 至少需要其中之一)",
-    ))
+    if tool_calls.len() == 1 {
+        return tool_calls.last_mut();
+    }
+    tool_calls
+        .iter_mut()
+        .rev()
+        .find(|call| call.input.is_empty())
+}
+
+fn upsert_tool_call(tool_calls: &mut Vec<ToolInvocation>, call: ToolInvocation) {
+    if let Some(idx) = tool_calls
+        .iter()
+        .position(|existing| existing.id == call.id && existing.name == call.name)
+    {
+        tool_calls[idx] = call;
+    } else {
+        tool_calls.push(call);
+    }
+}
+
+fn normalize_tool_arguments(arguments: &str) -> String {
+    serde_json::from_str::<Value>(arguments)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("input")
+                .and_then(|input| input.as_str())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| arguments.to_string())
+}
+
+fn resolve_codex_auth() -> PiResult<CodexAuth> {
+    if let Some(token) = env_value("OPENAI_CODEX_API_KEY").or_else(|| env_value(CODEX_ACCESS_ENV)) {
+        let account_id = env_value(CODEX_ACCOUNT_ENV)
+            .map(Ok)
+            .unwrap_or_else(|| pi_auth::oauth::openai_codex_account_id(&token))?;
+        return Ok(CodexAuth {
+            access_token: token,
+            account_id,
+        });
+    }
+
+    use pi_auth::Resolver;
+    let mut resolver = pi_auth::layered_resolver()?;
+    let stored_access = resolver
+        .lookup(CODEX_PROVIDER_ID, CODEX_ACCESS_ENV)?
+        .or_else(|| {
+            resolver
+                .lookup(CODEX_PROVIDER_ID, "OPENAI_CODEX_API_KEY")
+                .ok()
+                .flatten()
+        });
+    let stored_refresh = resolver.lookup(CODEX_PROVIDER_ID, CODEX_REFRESH_ENV)?;
+    let ts_pi_auth = if stored_access.is_none() && stored_refresh.is_none() {
+        load_ts_pi_codex_auth()?
+    } else {
+        None
+    };
+
+    let access = stored_access.or_else(|| {
+        ts_pi_auth
+            .as_ref()
+            .map(|auth| auth.access_token.clone())
+            .filter(|token| !token.is_empty())
+    });
+    let refresh = stored_refresh.or_else(|| {
+        ts_pi_auth
+            .as_ref()
+            .and_then(|auth| auth.refresh_token.clone())
+            .filter(|token| !token.is_empty())
+    });
+    let needs_refresh = stored_token_needs_refresh(&resolver)?
+        || ts_pi_auth
+            .as_ref()
+            .and_then(|auth| auth.expires_at_unix)
+            .map(|expires| now_unix().saturating_add(60) >= expires)
+            .unwrap_or(false);
+
+    let mut access_token = match access {
+        Some(token) if !token.is_empty() && !needs_refresh => token,
+        _ => {
+            let refresh_token = refresh.ok_or_else(|| {
+                PiError::new(
+                    PiErrorKind::Provider,
+                    "缺少 OpenAI Codex OAuth 凭据。请运行 `pi auth login openai-codex` 或在原版 pi 中 `/login`，不要使用 OPENAI_API_KEY。",
+                )
+            })?;
+            refresh_codex_token(&mut resolver, &refresh_token)?
+        }
+    };
+
+    if access_token.is_empty() {
+        return Err(PiError::new(
+            PiErrorKind::Provider,
+            "OpenAI Codex OAuth access token 为空。请重新运行 `pi auth login openai-codex`。",
+        ));
+    }
+
+    let account_id = match resolver.lookup(CODEX_PROVIDER_ID, CODEX_ACCOUNT_ENV)? {
+        Some(id) if !id.is_empty() => id,
+        _ if ts_pi_auth
+            .as_ref()
+            .and_then(|auth| auth.account_id.as_deref())
+            .is_some() =>
+        {
+            ts_pi_auth
+                .as_ref()
+                .and_then(|auth| auth.account_id.clone())
+                .unwrap_or_default()
+        }
+        _ => {
+            let id = pi_auth::oauth::openai_codex_account_id(&access_token)?;
+            resolver.store(CODEX_PROVIDER_ID, CODEX_ACCOUNT_ENV, &id)?;
+            id
+        }
+    };
+
+    Ok(CodexAuth {
+        access_token: std::mem::take(&mut access_token),
+        account_id,
+    })
+}
+
+fn load_ts_pi_codex_auth() -> PiResult<Option<StoredCodexAuth>> {
+    let home = match env::var("HOME") {
+        Ok(home) => home,
+        Err(_) => return Ok(None),
+    };
+    let path = std::path::PathBuf::from(home)
+        .join(".pi")
+        .join("agent")
+        .join("auth.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path).map_err(|err| {
+        PiError::new(
+            PiErrorKind::Io,
+            format!("读取原版 pi auth 文件 {} 失败：{err}", path.display()),
+        )
+    })?;
+    let value: Value = serde_json::from_str(&text).map_err(|err| {
+        PiError::new(
+            PiErrorKind::Config,
+            format!("解析原版 pi auth 文件 {} 失败：{err}", path.display()),
+        )
+    })?;
+    let Some(credential) = value.get(CODEX_PROVIDER_ID) else {
+        return Ok(None);
+    };
+    if credential.get("type").and_then(|v| v.as_str()) != Some("oauth") {
+        return Ok(None);
+    }
+    let Some(access_token) = credential
+        .get("access")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+    else {
+        return Ok(None);
+    };
+    let refresh_token = credential
+        .get("refresh")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    let expires_at_unix = credential
+        .get("expires")
+        .and_then(|v| v.as_u64())
+        .map(|raw| {
+            if raw > 10_000_000_000 {
+                raw / 1000
+            } else {
+                raw
+            }
+        });
+    let account_id = credential
+        .get("accountId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    Ok(Some(StoredCodexAuth {
+        access_token,
+        refresh_token,
+        expires_at_unix,
+        account_id,
+    }))
+}
+
+fn env_value(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn stored_token_needs_refresh(resolver: &impl pi_auth::Resolver) -> PiResult<bool> {
+    let Some(raw) = resolver.lookup(CODEX_PROVIDER_ID, CODEX_EXPIRES_ENV)? else {
+        return Ok(false);
+    };
+    let expires_at = raw.parse::<u64>().map_err(|err| {
+        PiError::new(
+            PiErrorKind::Config,
+            format!("{CODEX_EXPIRES_ENV} 不是有效 UNIX 时间戳：{err}"),
+        )
+    })?;
+    Ok(now_unix().saturating_add(60) >= expires_at)
+}
+
+fn refresh_codex_token(
+    resolver: &mut impl pi_auth::Resolver,
+    refresh_token: &str,
+) -> PiResult<String> {
+    let config = pi_auth::oauth::openai_codex_config();
+    let tokens = pi_auth::oauth::refresh(&config, refresh_token)?;
+    resolver.store(CODEX_PROVIDER_ID, CODEX_ACCESS_ENV, &tokens.access_token)?;
+    if let Some(refresh) = tokens.refresh_token.as_deref() {
+        resolver.store(CODEX_PROVIDER_ID, CODEX_REFRESH_ENV, refresh)?;
+    }
+    if let Some(expires_at) = tokens.expires_at_unix {
+        resolver.store(
+            CODEX_PROVIDER_ID,
+            CODEX_EXPIRES_ENV,
+            &expires_at.to_string(),
+        )?;
+    }
+    let account_id = pi_auth::oauth::openai_codex_account_id(&tokens.access_token)?;
+    resolver.store(CODEX_PROVIDER_ID, CODEX_ACCOUNT_ENV, &account_id)?;
+    Ok(tokens.access_token)
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn codex_headers(auth: &CodexAuth) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "authorization",
+            format!("Bearer {}", auth.access_token.as_str()),
+        ),
+        ("chatgpt-account-id", auth.account_id.clone()),
+        ("originator", "pi".to_string()),
+        ("openai-beta", "responses=experimental".to_string()),
+    ]
+}
+
+fn header_refs<'a>(headers: &'a [(&'static str, String)]) -> Vec<(&'a str, &'a str)> {
+    headers
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect()
 }
 
 pub fn openai_codex_responses_info() -> ProviderInfo {
@@ -281,8 +565,15 @@ pub fn openai_codex_responses_info() -> ProviderInfo {
             "codex-high-latest".to_string(),
         ],
         local_first: false,
-        requires_api_key_env: Some("OPENAI_CODEX_API_KEY".to_string()),
+        requires_api_key_env: Some(CODEX_ACCESS_ENV.to_string()),
     }
+}
+
+pub fn openai_codex_info() -> ProviderInfo {
+    let mut info = openai_codex_responses_info();
+    info.id = CODEX_PROVIDER_ID.to_string();
+    info.display_name = "OpenAI Codex (ChatGPT Subscription)".to_string();
+    info
 }
 
 #[cfg(test)]

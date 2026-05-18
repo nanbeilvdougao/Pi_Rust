@@ -101,6 +101,9 @@ const ALIASES: &[(&str, &str, &str)] = &[
     ),
     ("responses", "openai-responses", "gpt-4.1"),
     ("o3", "openai-responses", "o3"),
+    ("codex", "openai-codex", "gpt-5.5"),
+    ("gpt55", "openai-codex", "gpt-5.5"),
+    ("gpt-5.5", "openai-codex", "gpt-5.5"),
 ];
 
 pub fn resolve_alias(input: &str) -> PiResult<ResolvedSelection> {
@@ -160,6 +163,7 @@ pub fn resolve_alias(input: &str) -> PiResult<ResolvedSelection> {
         "ollama",
         "mistral",
         "openrouter",
+        "openai-codex",
         "openai-responses",
         "azure",
         "bedrock",

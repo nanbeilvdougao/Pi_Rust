@@ -264,6 +264,7 @@ impl ProviderRegistry {
         registry.register(openai::openrouter_info());
         registry.register(openai::mistral_info());
         registry.register(openai_responses::openai_responses_info());
+        registry.register(openai_codex_responses::openai_codex_info());
         registry.register(openai_codex_responses::openai_codex_responses_info());
         registry.register(vertex::vertex_info());
         registry
@@ -356,7 +357,9 @@ pub fn provider_for(selection: &ModelSelection) -> PiResult<Box<dyn Provider>> {
         "openrouter" => Ok(Box::new(OpenAiCompatibleProvider::openrouter())),
         "mistral" => Ok(Box::new(OpenAiCompatibleProvider::mistral())),
         "openai-responses" => Ok(Box::new(OpenAiResponsesProvider::new())),
-        "openai-codex-responses" => Ok(Box::new(OpenAiCodexResponsesProvider::new())),
+        "openai-codex" | "openai-codex-responses" => {
+            Ok(Box::new(OpenAiCodexResponsesProvider::new()))
+        }
         "vertex" => Ok(Box::new(VertexProvider::new())),
         other => Err(PiError::new(
             PiErrorKind::Provider,

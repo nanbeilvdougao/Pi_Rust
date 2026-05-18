@@ -45,13 +45,13 @@ pub fn run(args: &[String]) -> PiResult<()> {
                     format!("未知 provider {provider}"),
                 )
             })?;
-            let removed = resolver.delete(provider, env_name)?;
+            let removed = remove_provider_auth(&mut resolver, provider, env_name)?;
             println!(
                 "{}",
                 if removed {
-                    format!("已删除 {env_name}")
+                    format!("已删除 {provider} 的 auth 凭据")
                 } else {
-                    format!("{env_name} 不在 auth 存储中")
+                    format!("{provider} 不在 auth 存储中")
                 }
             );
             Ok(())
@@ -88,23 +88,30 @@ fn refresh_provider(resolver: &mut impl Resolver, args: &[String]) -> PiResult<(
         )
     })?;
     let refresh_env = format!("{env_name}_REFRESH");
-    let refresh_token = resolver.lookup(provider, &refresh_env)?.ok_or_else(|| {
-        PiError::new(
-            PiErrorKind::NotFound,
-            format!(
+    let auth_provider = canonical_auth_provider(provider);
+    let refresh_token = resolver
+        .lookup(auth_provider, &refresh_env)?
+        .ok_or_else(|| {
+            PiError::new(
+                PiErrorKind::NotFound,
+                format!(
                 "{refresh_env} 不在 auth 存储中。先运行 `pi auth login {provider}` 取得 token。"
             ),
-        )
-    })?;
+            )
+        })?;
     let config = oauth_config_for(provider)?;
     let tokens = pi_auth::oauth::refresh(&config, &refresh_token)?;
-    resolver.store(provider, env_name, &tokens.access_token)?;
+    resolver.store(auth_provider, env_name, &tokens.access_token)?;
     if let Some(new_refresh) = tokens.refresh_token.as_deref() {
-        resolver.store(provider, &refresh_env, new_refresh)?;
+        resolver.store(auth_provider, &refresh_env, new_refresh)?;
+    }
+    if is_codex_provider(provider) {
+        let account_id = pi_auth::oauth::openai_codex_account_id(&tokens.access_token)?;
+        resolver.store(auth_provider, "OPENAI_CODEX_ACCOUNT_ID", &account_id)?;
     }
     if let Some(exp) = tokens.expires_at_unix {
         let exp_env = format!("{env_name}_EXPIRES_AT");
-        resolver.store(provider, &exp_env, &exp.to_string())?;
+        resolver.store(auth_provider, &exp_env, &exp.to_string())?;
     }
     println!("已刷新 {provider} 的 access_token");
     if let Some(secs) = tokens.expires_in {
@@ -133,14 +140,19 @@ fn login(resolver: &mut impl Resolver, args: &[String]) -> PiResult<()> {
             format!("未知 provider {provider}，无法保存 token"),
         )
     })?;
-    resolver.store(provider, env_name, &tokens.access_token)?;
+    let auth_provider = canonical_auth_provider(provider);
+    resolver.store(auth_provider, env_name, &tokens.access_token)?;
     if let Some(refresh) = tokens.refresh_token.as_deref() {
         let refresh_env = format!("{env_name}_REFRESH");
-        resolver.store(provider, &refresh_env, refresh)?;
+        resolver.store(auth_provider, &refresh_env, refresh)?;
+    }
+    if is_codex_provider(provider) {
+        let account_id = pi_auth::oauth::openai_codex_account_id(&tokens.access_token)?;
+        resolver.store(auth_provider, "OPENAI_CODEX_ACCOUNT_ID", &account_id)?;
     }
     if let Some(exp) = tokens.expires_at_unix {
         let exp_env = format!("{env_name}_EXPIRES_AT");
-        resolver.store(provider, &exp_env, &exp.to_string())?;
+        resolver.store(auth_provider, &exp_env, &exp.to_string())?;
     }
     println!("已通过 OAuth 登录 {provider} 并保存 token");
     if let Some(secs) = tokens.expires_in {
@@ -153,6 +165,9 @@ fn login(resolver: &mut impl Resolver, args: &[String]) -> PiResult<()> {
 }
 
 fn oauth_config_for(provider: &str) -> PiResult<OAuthConfig> {
+    if is_codex_provider(provider) {
+        return Ok(pi_auth::oauth::openai_codex_config());
+    }
     let client_id = std::env::var("PI_OAUTH_CLIENT_ID")
         .or_else(|_| {
             std::env::var(format!(
@@ -194,5 +209,47 @@ fn oauth_config_for(provider: &str) -> PiResult<OAuthConfig> {
         client_id,
         scope,
         redirect_path: "/callback".to_string(),
+        callback_host: "127.0.0.1".to_string(),
+        redirect_host: "127.0.0.1".to_string(),
+        callback_port: None,
+        extra_authorize_params: Vec::new(),
     })
+}
+
+fn is_codex_provider(provider: &str) -> bool {
+    matches!(provider, "openai-codex" | "openai-codex-responses")
+}
+
+fn canonical_auth_provider(provider: &str) -> &str {
+    if is_codex_provider(provider) {
+        "openai-codex"
+    } else {
+        provider
+    }
+}
+
+fn remove_provider_auth(
+    resolver: &mut impl Resolver,
+    provider: &str,
+    env_name: &str,
+) -> PiResult<bool> {
+    let auth_provider = canonical_auth_provider(provider);
+    let mut removed = resolver.delete(auth_provider, env_name)?;
+    for suffix in ["_REFRESH", "_EXPIRES_AT"] {
+        if resolver.delete(auth_provider, &format!("{env_name}{suffix}"))? {
+            removed = true;
+        }
+    }
+    if is_codex_provider(provider) {
+        for key in [
+            "OPENAI_CODEX_ACCOUNT_ID",
+            "OPENAI_CODEX_API_KEY",
+            "OPENAI_API_KEY",
+        ] {
+            if resolver.delete(auth_provider, key)? {
+                removed = true;
+            }
+        }
+    }
+    Ok(removed)
 }

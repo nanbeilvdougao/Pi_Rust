@@ -40,6 +40,15 @@ pub struct OAuthConfig {
     pub scope: Option<String>,
     /// Path segment for the loopback redirect, default `/callback`.
     pub redirect_path: String,
+    /// Interface used for the local callback listener.
+    pub callback_host: String,
+    /// Host name placed in the redirect URI. Some OAuth apps whitelist
+    /// `localhost` exactly while we still bind the listener to `127.0.0.1`.
+    pub redirect_host: String,
+    /// Optional fixed callback port for providers with a pre-registered URI.
+    pub callback_port: Option<u16>,
+    /// Provider-specific authorization query parameters.
+    pub extra_authorize_params: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -79,15 +88,85 @@ fn current_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// OAuth configuration used by the upstream TypeScript `pi` implementation for
+/// ChatGPT Plus/Pro Codex subscription access.
+pub fn openai_codex_config() -> OAuthConfig {
+    OAuthConfig {
+        provider: "openai-codex".to_string(),
+        authorize_endpoint: "https://auth.openai.com/oauth/authorize".to_string(),
+        token_endpoint: "https://auth.openai.com/oauth/token".to_string(),
+        client_id: "app_EMoamEEZ73f0CkXaXp7hrann".to_string(),
+        scope: Some("openid profile email offline_access".to_string()),
+        redirect_path: "/auth/callback".to_string(),
+        callback_host: std::env::var("PI_OAUTH_CALLBACK_HOST")
+            .unwrap_or_else(|_| "127.0.0.1".to_string()),
+        redirect_host: "localhost".to_string(),
+        callback_port: Some(1455),
+        extra_authorize_params: vec![
+            ("id_token_add_organizations".to_string(), "true".to_string()),
+            ("codex_cli_simplified_flow".to_string(), "true".to_string()),
+            ("originator".to_string(), "pi".to_string()),
+        ],
+    }
+}
+
+/// Extract the ChatGPT account id required by the Codex backend from the OAuth
+/// access token's JWT payload.
+pub fn openai_codex_account_id(access_token: &str) -> PiResult<String> {
+    let mut parts = access_token.split('.');
+    let _header = parts.next();
+    let payload = parts.next().ok_or_else(|| {
+        PiError::new(
+            PiErrorKind::Provider,
+            "OpenAI Codex access token 不是有效 JWT",
+        )
+    })?;
+    if parts.next().is_none() {
+        return Err(PiError::new(
+            PiErrorKind::Provider,
+            "OpenAI Codex access token 不是有效 JWT",
+        ));
+    }
+    let bytes = base64url_decode(payload)?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|err| {
+        PiError::new(
+            PiErrorKind::Provider,
+            format!("解析 OpenAI Codex access token 失败：{err}"),
+        )
+    })?;
+    value
+        .get("https://api.openai.com/auth")
+        .and_then(|auth| auth.get("chatgpt_account_id"))
+        .and_then(|id| id.as_str())
+        .filter(|id| !id.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            PiError::new(
+                PiErrorKind::Provider,
+                "OpenAI Codex access token 缺少 chatgpt_account_id",
+            )
+        })
+}
+
 /// Run the full PKCE flow synchronously and return the resulting tokens.
 /// `timeout` caps how long we wait for the browser callback.
 pub fn run(config: &OAuthConfig, timeout: Duration, open_browser: bool) -> PiResult<OAuthTokens> {
-    let listener = TcpListener::bind("127.0.0.1:0")
+    let bind_addr = format!(
+        "{}:{}",
+        config.callback_host,
+        config.callback_port.unwrap_or(0)
+    );
+    let listener = TcpListener::bind(&bind_addr)
         .map_err(|err| PiError::new(PiErrorKind::Io, format!("无法绑定本地回调端口：{err}")))?;
     let addr = listener
         .local_addr()
         .map_err(|err| PiError::new(PiErrorKind::Io, format!("读取本地端口失败：{err}")))?;
-    let redirect_uri = format!("http://127.0.0.1:{}{}", addr.port(), config.redirect_path);
+    let redirect_uri = format!(
+        "http://{}:{}{}",
+        config.redirect_host,
+        addr.port(),
+        config.redirect_path
+    );
 
     let state = random_token(24);
     let verifier = random_token(64);
@@ -104,6 +183,12 @@ pub fn run(config: &OAuthConfig, timeout: Duration, open_browser: bool) -> PiRes
     if let Some(scope) = &config.scope {
         url.push_str("&scope=");
         url.push_str(&urlencode(scope));
+    }
+    for (key, value) in &config.extra_authorize_params {
+        url.push('&');
+        url.push_str(&urlencode(key));
+        url.push('=');
+        url.push_str(&urlencode(value));
     }
 
     eprintln!(
@@ -268,11 +353,26 @@ pub fn refresh(config: &OAuthConfig, refresh_token: &str) -> PiResult<OAuthToken
 
 fn post_token_request(token_endpoint: &str, body: &str) -> PiResult<OAuthTokens> {
     let agent = ureq_shim::agent();
-    let response = agent
+    let response = match agent
         .post(token_endpoint)
         .set("content-type", "application/x-www-form-urlencoded")
         .send_string(body)
-        .map_err(|err| PiError::new(PiErrorKind::Network, format!("token 交换失败：{err}")))?;
+    {
+        Ok(response) => response,
+        Err(ureq::Error::Status(status, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            return Err(PiError::new(
+                PiErrorKind::Provider,
+                format!("token 交换失败 HTTP {status}：{body}"),
+            ));
+        }
+        Err(ureq::Error::Transport(err)) => {
+            return Err(PiError::new(
+                PiErrorKind::Network,
+                format!("token 交换失败：{err}"),
+            ));
+        }
+    };
     let text = response
         .into_string()
         .map_err(|err| PiError::new(PiErrorKind::Network, format!("读取 token 响应失败：{err}")))?;
@@ -368,6 +468,52 @@ fn base64url(bytes: &[u8]) -> String {
     out
 }
 
+fn base64url_decode(input: &str) -> PiResult<Vec<u8>> {
+    fn val(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'-' => Some(62),
+            b'_' => Some(63),
+            b'=' => None,
+            _ => None,
+        }
+    }
+
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    let mut i = 0;
+    while i < bytes.len() {
+        let remaining = bytes.len() - i;
+        let take = remaining.min(4);
+        if take == 1 {
+            return Err(PiError::new(
+                PiErrorKind::Provider,
+                "无效 base64url JWT payload",
+            ));
+        }
+        let mut chunk = [0u8; 4];
+        for j in 0..take {
+            chunk[j] = val(bytes[i + j])
+                .ok_or_else(|| PiError::new(PiErrorKind::Provider, "无效 base64url JWT payload"))?;
+        }
+        let triple = ((chunk[0] as u32) << 18)
+            | ((chunk[1] as u32) << 12)
+            | ((chunk[2] as u32) << 6)
+            | (chunk[3] as u32);
+        out.push(((triple >> 16) & 0xff) as u8);
+        if take >= 3 {
+            out.push(((triple >> 8) & 0xff) as u8);
+        }
+        if take == 4 {
+            out.push((triple & 0xff) as u8);
+        }
+        i += take;
+    }
+    Ok(out)
+}
+
 fn urlencode(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for byte in input.bytes() {
@@ -447,6 +593,35 @@ mod tests {
     fn base64url_encodes_known_value() {
         assert_eq!(base64url(&[0xff, 0xff, 0xff]), "____");
         assert_eq!(base64url(b"hi"), "aGk");
+    }
+
+    #[test]
+    fn codex_config_matches_upstream_oauth_app() {
+        let config = openai_codex_config();
+        assert_eq!(config.client_id, "app_EMoamEEZ73f0CkXaXp7hrann");
+        assert_eq!(config.redirect_path, "/auth/callback");
+        assert_eq!(config.redirect_host, "localhost");
+        assert_eq!(config.callback_port, Some(1455));
+        assert!(config
+            .extra_authorize_params
+            .iter()
+            .any(|(key, value)| key == "codex_cli_simplified_flow" && value == "true"));
+    }
+
+    #[test]
+    fn extracts_codex_account_id_from_access_token() {
+        let payload = serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct_123"
+            }
+        });
+        let token = format!(
+            "{}.{}.sig",
+            base64url(br#"{"alg":"none"}"#),
+            base64url(payload.to_string().as_bytes())
+        );
+        let account_id = openai_codex_account_id(&token).expect("account id");
+        assert_eq!(account_id, "acct_123");
     }
 
     #[test]
